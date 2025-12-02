@@ -1,0 +1,70 @@
+# Project Specification: Task Management API
+
+## Overview
+Build a RESTful API for a task management application using Python and Flask.
+The system should handle user authentication, task CRUD operations, and provide
+a simple but secure backend for a todo application.
+
+## Technical Requirements
+
+### Architecture
+1. Use Flask as the web framework
+2. Use SQLite for the database (development) with SQLAlchemy ORM
+3. Implement RESTful API design principles
+4. Use environment variables for configuration (no hardcoded secrets)
+5. Structure code in a modular fashion (routes, models, services)
+
+### Authentication & Security
+6. Implement JWT-based authentication
+7. Hash all passwords using bcrypt or argon2
+8. Validate and sanitize all user inputs
+9. Implement rate limiting on authentication endpoints
+10. Use HTTPS in production
+
+### API Endpoints
+11. POST /auth/register - User registration
+12. POST /auth/login - User login (returns JWT)
+13. GET /tasks - List all tasks for authenticated user
+14. POST /tasks - Create a new task
+15. GET /tasks/{id} - Get a specific task
+16. PUT /tasks/{id} - Update a task
+17. DELETE /tasks/{id} - Delete a task
+
+### Data Models
+18. User: id, email, password_hash, created_at
+19. Task: id, user_id, title, description, completed, created_at, updated_at
+
+## Functional Requirements
+
+### User Management
+1. Users can register with email and password
+2. Email addresses must be unique and valid format
+3. Passwords must be at least 8 characters with mixed case and numbers
+4. Users can log in and receive an authentication token
+5. Tokens should expire after 24 hours
+
+### Task Management
+6. Users can only see their own tasks
+7. Tasks can be marked as completed or incomplete
+8. Tasks have a title (required, max 100 chars) and description (optional, max 500 chars)
+9. Tasks are sorted by created date (newest first) by default
+10. Deleted tasks are permanently removed
+
+### Error Handling
+11. Return appropriate HTTP status codes (200, 201, 400, 401, 403, 404, 500)
+12. All errors should return JSON with "error" field
+13. Log all errors with stack traces
+14. Handle database connection failures gracefully
+15. Validate request body schema before processing
+
+### Performance
+16. API response time should be under 200ms for simple queries
+17. Implement pagination for task listing (default: 20 per page)
+18. Use database indexes on frequently queried fields
+
+## Code Quality
+- Follow PEP 8 style guidelines
+- Include docstrings for all public functions
+- Write unit tests for critical paths
+- No SQL injection vulnerabilities
+- No hardcoded credentials

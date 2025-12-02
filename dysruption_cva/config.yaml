@@ -1,0 +1,107 @@
+# Dysruption Consensus Verifier Agent (CVA) Configuration
+# Version: 1.0
+
+# LLM Configuration
+llms:
+  # Architect/Logic Judge - Claude 3.5 Sonnet
+  architect:
+    model: "claude-3-5-sonnet-20241022"
+    provider: "anthropic"
+    max_tokens: 4096
+    temperature: 0.1
+    cost_per_1k_input: 0.003
+    cost_per_1k_output: 0.015
+  
+  # Security/Efficiency Judge - Llama 3 70B via Groq
+  security:
+    model: "groq/llama-3.1-70b-versatile"
+    provider: "groq"
+    max_tokens: 4096
+    temperature: 0.1
+    cost_per_1k_input: 0.00059
+    cost_per_1k_output: 0.00079
+  
+  # User Proxy/Vibe Judge - Gemini 1.5 Pro
+  user_proxy:
+    model: "gemini/gemini-1.5-pro"
+    provider: "google"
+    max_tokens: 4096
+    temperature: 0.1
+    cost_per_1k_input: 0.00125
+    cost_per_1k_output: 0.005
+  
+  # Extraction LLM - Gemini 1.5 Flash (cheap, fast)
+  extraction:
+    model: "gemini/gemini-1.5-flash"
+    provider: "google"
+    max_tokens: 4096
+    temperature: 0.0
+    cost_per_1k_input: 0.000075
+    cost_per_1k_output: 0.0003
+  
+  # Remediation LLM - Gemini 1.5 Flash (cheap)
+  remediation:
+    model: "gemini/gemini-1.5-flash"
+    provider: "google"
+    max_tokens: 8192
+    temperature: 0.2
+    cost_per_1k_input: 0.000075
+    cost_per_1k_output: 0.0003
+
+# Thresholds
+thresholds:
+  pass_score: 7  # Minimum score out of 10 to pass
+  consensus_ratio: 0.67  # 2/3 majority required
+  min_invariants: 5  # Minimum invariants to extract from spec
+  chunk_size_tokens: 10000  # Max tokens per chunk
+  context_window: 128000  # Max context window
+
+# Watcher Configuration
+watcher:
+  debounce_seconds: 15
+  supported_extensions:
+    python: [".py"]
+    javascript: [".js", ".ts", ".jsx", ".tsx"]
+  ignore_patterns:
+    - "__pycache__"
+    - "node_modules"
+    - ".git"
+    - ".venv"
+    - "venv"
+    - "*.pyc"
+    - "*.pyo"
+    - ".env"
+    - "*.log"
+
+# Static Analysis
+static_analysis:
+  enabled: true
+  pylint:
+    enabled: true
+    max_line_length: 120
+    disable: ["C0114", "C0115", "C0116"]  # Disable docstring warnings
+  bandit:
+    enabled: true
+    severity: "low"  # low, medium, high
+
+# Remediation
+remediation:
+  enabled: false  # Set to true to enable fix suggestions
+  max_fixes_per_file: 5
+
+# Retry Configuration
+retry:
+  max_attempts: 3
+  backoff_seconds: 2
+
+# Output
+output:
+  report_file: "REPORT.md"
+  verdict_file: "verdict.json"
+  criteria_file: "criteria.json"
+  verbose: true
+
+# Fallback Configuration
+fallback:
+  enabled: true
+  model: "groq/llama-3.1-70b-versatile"  # Fallback to Groq if primary fails
