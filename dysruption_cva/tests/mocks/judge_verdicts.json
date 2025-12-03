@@ -1,0 +1,54 @@
+{
+  "architect_verdict": {
+    "score": 8,
+    "explanation": "Good architecture following SOLID principles. Code is well-organized with proper separation of concerns. Minor improvement opportunities in error handling patterns.",
+    "issues": [
+      "Error handling could be more granular",
+      "Consider adding dependency injection for better testability"
+    ],
+    "suggestions": [
+      "Implement custom exception classes",
+      "Add factory pattern for complex object creation"
+    ],
+    "confidence": 0.85
+  },
+  "security_verdict_pass": {
+    "score": 9,
+    "explanation": "Excellent security posture. No obvious vulnerabilities. Proper input validation and secrets management.",
+    "issues": [],
+    "suggestions": [
+      "Consider adding rate limiting",
+      "Add security headers to responses"
+    ],
+    "confidence": 0.9
+  },
+  "security_verdict_fail_veto": {
+    "score": 3,
+    "explanation": "CRITICAL: SQL injection vulnerability detected in query construction. Hardcoded credentials found. Insufficient input validation.",
+    "issues": [
+      "SQL injection in user lookup",
+      "Hardcoded database password",
+      "Missing input sanitization",
+      "No parameterized queries"
+    ],
+    "suggestions": [
+      "Use parameterized queries immediately",
+      "Move credentials to environment variables",
+      "Implement input validation middleware"
+    ],
+    "confidence": 0.95
+  },
+  "user_proxy_verdict": {
+    "score": 7,
+    "explanation": "Implementation meets core requirements. User experience is acceptable but could be improved with better error messages.",
+    "issues": [
+      "Error messages not user-friendly",
+      "Missing loading indicators in spec"
+    ],
+    "suggestions": [
+      "Improve error message clarity",
+      "Add progress feedback for long operations"
+    ],
+    "confidence": 0.78
+  }
+}

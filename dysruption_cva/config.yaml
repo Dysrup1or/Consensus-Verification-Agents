@@ -1,60 +1,85 @@
 # Dysruption Consensus Verifier Agent (CVA) Configuration
-# Version: 1.0
+# Version: 1.1
 
-# LLM Configuration
+# LLM Configuration - Optimal Model Ensemble
 llms:
-  # Architect/Logic Judge - Claude 3.5 Sonnet
+  # Architect/Logic Judge - Claude 4 Sonnet (Best for architecture analysis)
   architect:
-    model: "claude-3-5-sonnet-20241022"
+    model: "anthropic/claude-sonnet-4-20250514"
     provider: "anthropic"
     max_tokens: 4096
-    temperature: 0.1
+    temperature: 0.0  # Deterministic for consistency
     cost_per_1k_input: 0.003
     cost_per_1k_output: 0.015
+    role: "Senior Architect"
+    focus: "logic, structure, efficiency, modularity"
   
-  # Security/Efficiency Judge - Llama 3 70B via Groq
+  # Security/Efficiency Judge - DeepSeek V3 via Groq (Best for security scanning)
   security:
-    model: "groq/llama-3.1-70b-versatile"
+    model: "groq/deepseek-r1-distill-llama-70b"
     provider: "groq"
     max_tokens: 4096
-    temperature: 0.1
+    temperature: 0.0
     cost_per_1k_input: 0.00059
     cost_per_1k_output: 0.00079
+    role: "Security Expert"
+    focus: "vulnerabilities, OWASP risks, hardcoded secrets"
   
-  # User Proxy/Vibe Judge - Gemini 1.5 Pro
+  # User Proxy/Vibe Judge - Gemini 2.5 Pro (Best for spec alignment)
   user_proxy:
-    model: "gemini/gemini-1.5-pro"
+    model: "gemini/gemini-2.5-pro-preview-06-05"
     provider: "google"
     max_tokens: 4096
     temperature: 0.1
     cost_per_1k_input: 0.00125
     cost_per_1k_output: 0.005
+    role: "User Advocate"
+    focus: "usability, requirement matching, user intent"
   
-  # Extraction LLM - Gemini 1.5 Flash (cheap, fast)
+  # Extraction LLM - Gemini 1.5 Flash (Fast, cheap for parsing)
   extraction:
     model: "gemini/gemini-1.5-flash"
     provider: "google"
     max_tokens: 4096
-    temperature: 0.0
+    temperature: 0.1
     cost_per_1k_input: 0.000075
     cost_per_1k_output: 0.0003
+    role: "Requirements Analyst"
+    focus: "exhaustive extraction, schema validation"
   
-  # Remediation LLM - Gemini 1.5 Flash (cheap)
+  # Remediation LLM - GPT-4o-mini (Best for code fixes)
   remediation:
-    model: "gemini/gemini-1.5-flash"
-    provider: "google"
+    model: "openai/gpt-4o-mini"
+    provider: "openai"
     max_tokens: 8192
     temperature: 0.2
-    cost_per_1k_input: 0.000075
-    cost_per_1k_output: 0.0003
+    cost_per_1k_input: 0.00015
+    cost_per_1k_output: 0.0006
+    role: "Code Fixer"
+    focus: "generate patches, fix flaws"
+  
+  # Fallback models (used when primary fails)
+  fallback:
+    primary: "groq/llama-3.1-70b-versatile"
+    secondary: "gemini/gemini-1.5-flash"
 
 # Thresholds
 thresholds:
   pass_score: 7  # Minimum score out of 10 to pass
   consensus_ratio: 0.67  # 2/3 majority required
+  confidence_min: 0.7  # Minimum confidence for valid judgment
   min_invariants: 5  # Minimum invariants to extract from spec
   chunk_size_tokens: 10000  # Max tokens per chunk
   context_window: 128000  # Max context window
+  human_alignment_target: 0.85  # 85% target alignment with human judgments
+
+# Environment Variable Keys
+env_keys:
+  anthropic: "ANTHROPIC_API_KEY"
+  google: "GOOGLE_API_KEY"
+  groq: "GROQ_API_KEY"
+  openai: "OPENAI_API_KEY"
+  deepseek: "DEEPSEEK_API_KEY"
 
 # Watcher Configuration
 watcher:
@@ -93,6 +118,8 @@ remediation:
 retry:
   max_attempts: 3
   backoff_seconds: 2
+  backoff_multiplier: 2  # Exponential backoff: 2s, 4s, 8s
+  fallback_enabled: true
 
 # Output
 output:
@@ -100,6 +127,13 @@ output:
   verdict_file: "verdict.json"
   criteria_file: "criteria.json"
   verbose: true
+  color_coded: true  # Green/Red sections in report
+
+# Async Configuration
+async_config:
+  enabled: true
+  max_concurrent_calls: 5
+  timeout_seconds: 60
 
 # Fallback Configuration
 fallback:

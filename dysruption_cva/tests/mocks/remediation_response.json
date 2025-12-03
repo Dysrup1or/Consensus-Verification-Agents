@@ -1,0 +1,17 @@
+{
+  "remediation_response": {
+    "criterion_id": 1,
+    "fixes": [
+      {
+        "file": "database.py",
+        "description": "Fix SQL injection using parameterized query",
+        "diff": "--- a/database.py\n+++ b/database.py\n@@ -10,7 +10,7 @@\n def get_user(username):\n     '''Retrieve user by username'''\n     conn = get_connection()\n-    result = conn.execute(f\"SELECT * FROM users WHERE name='{username}'\")\n+    result = conn.execute(\"SELECT * FROM users WHERE name = ?\", (username,))\n     return result.fetchone()"
+      },
+      {
+        "file": "config.py",
+        "description": "Move hardcoded credential to environment variable",
+        "diff": "--- a/config.py\n+++ b/config.py\n@@ -1,5 +1,6 @@\n+import os\n \n # Database configuration\n-DB_PASSWORD = \"super_secret_123\"\n+DB_PASSWORD = os.environ.get(\"DB_PASSWORD\")\n DB_HOST = \"localhost\""
+      }
+    ]
+  }
+}

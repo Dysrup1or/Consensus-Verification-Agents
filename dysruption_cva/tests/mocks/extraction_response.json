@@ -1,0 +1,60 @@
+{
+  "extraction_response": {
+    "security": [
+      {
+        "id": 1,
+        "desc": "Use environment variables for all sensitive credentials",
+        "severity": "critical"
+      },
+      {
+        "id": 2,
+        "desc": "Implement input validation on all user-provided data",
+        "severity": "high"
+      },
+      {
+        "id": 3,
+        "desc": "Use HTTPS for all API communications",
+        "severity": "high"
+      }
+    ],
+    "functionality": [
+      {
+        "id": 1,
+        "desc": "Implement user authentication via JWT tokens",
+        "severity": "critical"
+      },
+      {
+        "id": 2,
+        "desc": "Support CRUD operations for the main entity",
+        "severity": "high"
+      },
+      {
+        "id": 3,
+        "desc": "Return appropriate HTTP status codes",
+        "severity": "medium"
+      },
+      {
+        "id": 4,
+        "desc": "Handle errors gracefully with informative messages",
+        "severity": "medium"
+      }
+    ],
+    "style": [
+      {
+        "id": 1,
+        "desc": "Follow PEP 8 style guidelines",
+        "severity": "medium"
+      },
+      {
+        "id": 2,
+        "desc": "Include type hints for all function signatures",
+        "severity": "medium"
+      },
+      {
+        "id": 3,
+        "desc": "Add docstrings to all public functions and classes",
+        "severity": "low"
+      }
+    ]
+  }
+}

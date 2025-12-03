@@ -1,4 +1,4 @@
-# Dysruption Consensus Verifier Agent (CVA) v1.0
+# Dysruption Consensus Verifier Agent (CVA) v1.1
 
 A multi-model AI tribunal for automated code verification against specifications.
 
@@ -9,21 +9,40 @@ The Dysruption CVA is a Python-based system that:
 1. **Watches** your codebase for changes (or runs on-demand)
 2. **Extracts** requirements from a specification file using AI
 3. **Adjudicates** code quality using a tribunal of 3 LLM judges:
-   - **Claude 3.5 Sonnet**: Architecture and logic evaluation
-   - **Llama 3 (via Groq)**: Security and efficiency scanning
-   - **Gemini 1.5 Pro**: Spec alignment and user intent verification
-4. **Generates** detailed reports with verdicts, scores, and fix suggestions
+   - **Claude 4 Sonnet**: Architecture, design patterns, and logic evaluation
+   - **DeepSeek V3**: Security vulnerabilities and efficiency analysis (Veto Authority)
+   - **Gemini 2.5 Pro**: Spec alignment and user intent verification
+4. **Generates** detailed reports with verdicts, scores, and diff-based fix suggestions
+
+## v1.1 Updates
+
+### New Features
+- 🆕 **New Models**: Claude 4 Sonnet, DeepSeek V3, Gemini 2.5 Pro, GPT-4o-mini
+- 📝 **Enhanced Prompts**: Rubric-based scoring with few-shot examples
+- 🔧 **Diff-Based Remediation**: GPT-4o-mini generates unified diff patches
+- 🔒 **Improved Security Analysis**: Detailed vulnerability checklists
+- 📊 **Better Scoring**: 1-10 rubric with clear criteria for each level
+
+### Backend API (NEW)
+- 🚀 **FastAPI Backend**: REST endpoints + WebSocket for real-time streaming
+- 🚫 **Veto Protocol**: Security judge FAIL with >80% confidence = final FAIL
+- ⛔ **Fail-Fast**: Critical pylint/bandit issues abort pipeline immediately
+- 📋 **Category Coverage**: Enforced Security, Functionality, Style categories
+- 🕒 **Smart Debounce**: 3-second debounce that resets on each file save
 
 ## Features
 
 - ⚖️ Multi-model consensus voting (2/3 majority required)
+- 🚫 Security Veto Protocol (>80% confidence FAIL = final FAIL)
+- ⛔ Fail-fast on critical static analysis issues
 - 🔍 Static analysis via pylint and bandit (pre-LLM screening)
 - 📊 Color-coded REPORT.md with detailed explanations
 - 🔄 CI/CD compatible JSON output (verdict.json)
-- 👁️ Watch mode with 15-second debounce
-- 🔧 Optional AI-powered remediation suggestions
+- 👁️ Watch mode with smart 3-second debounce
+- 🔧 AI-powered remediation with unified diff output
 - 🌐 Git repository support (clone and verify)
 - 🔐 Configurable LLM selection and thresholds
+- 🚀 FastAPI REST + WebSocket API
 
 ## Installation
 
@@ -39,33 +58,36 @@ The Dysruption CVA is a Python-based system that:
 cd dysruption_cva
 
 # Install required packages
-pip install watchdog litellm loguru pylint bandit gitpython pyyaml requests
-
-# Or install from requirements.txt
 pip install -r requirements.txt
+
+# Or install manually
+pip install watchdog litellm loguru pylint bandit gitpython pyyaml requests \
+            pydantic fastapi uvicorn websockets httpx
 ```
 
 ### Set Environment Variables
 
-The CVA requires API keys for the LLM providers:
+The CVA requires API keys for the LLM providers. Create a `.env` file or set them directly:
 
 ```bash
 # Windows (PowerShell)
-$env:ANTHROPIC_API_KEY = "your-anthropic-key"
-$env:GOOGLE_API_KEY = "your-google-key"
-$env:GROQ_API_KEY = "your-groq-key"
+$env:GOOGLE_API_KEY = "your-google-key"          # Gemini (extraction + user proxy)
+$env:ANTHROPIC_API_KEY = "your-anthropic-key"    # Claude (architect)
+$env:DEEPSEEK_API_KEY = "your-deepseek-key"      # DeepSeek (security)
+$env:OPENAI_API_KEY = "your-openai-key"          # GPT-4o-mini (remediation)
 
 # Linux/macOS
-export ANTHROPIC_API_KEY="your-anthropic-key"
 export GOOGLE_API_KEY="your-google-key"
-export GROQ_API_KEY="your-groq-key"
+export ANTHROPIC_API_KEY="your-anthropic-key"
+export DEEPSEEK_API_KEY="your-deepseek-key"
+export OPENAI_API_KEY="your-openai-key"
 ```
 
 **Note**: At minimum, you need `GOOGLE_API_KEY` (for Gemini extraction) and one of the judge API keys.
 
 ## Usage
 
-### Basic Usage
+### CLI Usage
 
 ```bash
 # Verify current directory
@@ -76,20 +98,63 @@ python cva.py --dir ./my_project
 
 # Use custom spec file
 python cva.py --dir ./my_project --spec requirements.txt
-```
 
-### Watch Mode
-
-```bash
-# Watch for changes (re-verifies after 15s of inactivity)
+# Watch for changes (re-verifies after 3s of inactivity)
 python cva.py --dir ./my_project --watch
-```
 
-### Git Repository
-
-```bash
 # Clone and verify a GitHub repository
 python cva.py --git https://github.com/user/repo
+```
+
+### FastAPI Backend (NEW)
+
+```bash
+# Start the API server
+uvicorn modules.api:app --host 0.0.0.0 --port 8000 --reload
+
+# Or run directly
+python -m modules.api
+```
+
+#### REST Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/run` | POST | Start a verification run |
+| `/status/{run_id}` | GET | Get run status and progress |
+| `/verdict/{run_id}` | GET | Get final verdict (when complete) |
+| `/runs` | GET | List all verification runs |
+| `/run/{run_id}` | DELETE | Cancel a running verification |
+
+#### WebSocket
+
+Connect to `/ws/{run_id}` for real-time status streaming:
+
+```javascript
+const ws = new WebSocket('ws://localhost:8000/ws/abc123');
+
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    console.log(`[${data.type}] ${data.data.message}`);
+    // Types: 'status', 'progress', 'verdict', 'error'
+};
+```
+
+#### Example API Usage
+
+```bash
+# Start verification
+curl -X POST http://localhost:8000/run \
+  -H "Content-Type: application/json" \
+  -d '{"target_dir": "./my_project", "generate_patches": true}'
+
+# Response: {"run_id": "abc123", "status": "scanning", "message": "..."}
+
+# Check status
+curl http://localhost:8000/status/abc123
+
+# Get verdict (when complete)
+curl http://localhost:8000/verdict/abc123
 ```
 
 ### Options
@@ -116,26 +181,76 @@ Options:
 Edit `config.yaml` to customize:
 
 ```yaml
-# LLM Models
+# LLM Models (v1.1)
 llms:
-  architect:
-    model: "claude-3-5-sonnet-20241022"
-  security:
-    model: "groq/llama-3.1-70b-versatile"
-  user_proxy:
-    model: "gemini/gemini-1.5-pro"
   extraction:
-    model: "gemini/gemini-1.5-flash"
+    model: "google/gemini-1.5-flash-latest"
+  architect:
+    model: "anthropic/claude-4-sonnet-20250514"
+  security:
+    model: "deepseek/deepseek-chat"
+  user_proxy:
+    model: "google/gemini-2.5-pro-exp-03-25"
+  remediation:
+    model: "openai/gpt-4o-mini"
 
 # Thresholds
 thresholds:
   pass_score: 7          # Minimum score (1-10)
   consensus_ratio: 0.67  # 2/3 majority
+  min_per_category: 2    # Minimum invariants per category
+
+# Static Analysis (Fail-Fast)
+static_analysis:
+  enabled: true
+  fail_fast: true        # Abort on critical issues
+  pylint:
+    enabled: true
+  bandit:
+    enabled: true
 
 # Enable remediation suggestions
 remediation:
   enabled: true
 ```
+
+## Veto Protocol (v1.1)
+
+The Security Judge has **veto authority**. If the Security Judge:
+1. Votes **FAIL** on a criterion
+2. With **confidence > 80%**
+
+Then the **final verdict is FAIL**, regardless of other judges.
+
+This ensures critical security issues cannot be overridden by majority vote.
+
+```
+Example Scenario:
+- Architect Judge: PASS (8/10)
+- Security Judge: FAIL (3/10, 95% confidence) ← VETO
+- User Proxy Judge: PASS (7/10)
+
+Result: VETO (Security issues detected with high confidence)
+```
+
+## Fail-Fast Static Analysis (v1.1)
+
+If static analysis (pylint/bandit) finds **critical issues**, the pipeline aborts immediately:
+
+- **Pylint**: `error` or `fatal` type issues
+- **Bandit**: `HIGH` severity issues
+
+This saves API costs by not calling LLM judges on fundamentally broken code.
+
+## Category Coverage Enforcement (v1.1)
+
+The parser now enforces that extracted invariants cover all three required categories:
+
+1. **Security** (min 2 requirements): Auth, validation, encryption, secrets
+2. **Functionality** (min 3 requirements): Features, logic, data handling
+3. **Style** (min 2 requirements): Formatting, types, docs, linting
+
+If a category is missing or sparse, the parser **re-prompts specifically** for that category.
 
 ## Creating a Specification File
 
@@ -269,21 +384,31 @@ if ($verdict.ci_cd.success) {
 
 ```
 dysruption_cva/
-├── cva.py              # Main CLI entry point
-├── config.yaml         # Configuration file
-├── spec.txt            # Sample specification
-├── README.md           # This file
+├── cva.py                  # Main CLI entry point
+├── config.yaml             # Configuration file
+├── spec.txt                # Sample specification
+├── README.md               # This file
+├── requirements.txt        # Python dependencies
 ├── modules/
-│   ├── __init__.py
-│   ├── watcher.py      # Directory watcher (Module A)
-│   ├── parser.py       # Constitution parser (Module B)
-│   └── tribunal.py     # Multi-model tribunal (Module C)
+│   ├── __init__.py         # Module exports
+│   ├── schemas.py          # Pydantic models (v1.1)
+│   ├── watcher.py          # Directory watcher (Module A)
+│   ├── watcher_v2.py       # Smart debounce watcher (v1.1)
+│   ├── parser.py           # Constitution parser (Module B)
+│   ├── tribunal.py         # Multi-model tribunal (Module C)
+│   ├── api.py              # FastAPI backend (v1.1)
+│   └── sandbox_runner.py   # Code execution stub (v1.1)
 ├── tests/
 │   ├── __init__.py
 │   ├── test_watcher.py
 │   ├── test_parser.py
-│   └── test_tribunal.py
-└── sample_project/     # Sample project for testing
+│   ├── test_tribunal.py
+│   └── mocks/              # Deterministic test responses (v1.1)
+│       ├── __init__.py
+│       ├── extraction_response.json
+│       ├── judge_verdicts.json
+│       └── remediation_response.json
+└── sample_project/         # Sample project for testing
     ├── app.py
     └── models.py
 ```
@@ -308,13 +433,13 @@ dysruption_cva/
 ### 3. Tribunal Adjudication (tribunal.py)
 
 - Pre-runs static analysis (pylint, bandit)
-- Routes code to 3 LLM judges:
-  - **Architect (Claude)**: Logic and architecture
-  - **Security (Llama)**: Vulnerabilities and efficiency
-  - **User Proxy (Gemini)**: Spec alignment
+- Routes code to 3 LLM judges with rubric-based prompts:
+  - **Architect (Claude 4 Sonnet)**: Logic, design patterns, and architecture
+  - **Security (DeepSeek V3)**: Vulnerabilities and efficiency
+  - **User Proxy (Gemini 2.5 Pro)**: Spec alignment and user intent
 - Computes weighted consensus (2/3 majority)
 - Generates REPORT.md and verdict.json
-- Optional: AI remediation suggestions
+- GPT-4o-mini generates unified diff remediation patches
 
 ## Troubleshooting
 
@@ -353,5 +478,5 @@ MIT License - See LICENSE file
 ## Credits
 
 - **Author**: Dysruption
-- **Version**: 1.0
-- **LLM Providers**: Anthropic, Google, Groq
+- **Version**: 1.1
+- **LLM Providers**: Anthropic (Claude), Google (Gemini), DeepSeek, OpenAI (GPT-4o-mini)

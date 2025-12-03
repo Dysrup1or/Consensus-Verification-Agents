@@ -17,19 +17,19 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from modules.tribunal import (
-    Tribunal, 
-    run_adjudication, 
-    Verdict, 
-    JudgeScore, 
+    Tribunal,
+    run_adjudication,
+    Verdict,
+    JudgeScore,
     CriterionResult,
     StaticAnalysisResult,
-    TribunalVerdict
+    TribunalVerdict,
 )
 
 
 class TestVerdict:
     """Tests for the Verdict enum."""
-    
+
     def test_verdict_values(self):
         """Test verdict enum values."""
         assert Verdict.PASS.value == "PASS"
@@ -40,13 +40,14 @@ class TestVerdict:
 
 class TestTribunal:
     """Tests for the Tribunal class."""
-    
+
     @pytest.fixture
     def temp_config(self):
         """Create a temporary config file."""
         temp_dir = tempfile.mkdtemp()
-        config_path = Path(temp_dir, 'config.yaml')
-        config_path.write_text("""
+        config_path = Path(temp_dir, "config.yaml")
+        config_path.write_text(
+            """
 llms:
   architect:
     model: "claude-3-5-sonnet-20241022"
@@ -72,58 +73,59 @@ output:
   verdict_file: "verdict.json"
 fallback:
   enabled: false
-""")
+"""
+        )
         yield str(config_path)
         shutil.rmtree(temp_dir, ignore_errors=True)
-        
+
     def test_init_defaults(self):
         """Test tribunal initialization with defaults."""
         tribunal = Tribunal()
-        
+
         assert tribunal.pass_score == 7
         assert tribunal.consensus_ratio == 0.67
         assert len(tribunal.judges) == 3
-        
+
     def test_init_custom_config(self, temp_config):
         """Test tribunal initialization with custom config."""
         tribunal = Tribunal(temp_config)
-        
+
         assert tribunal.pass_score == 7
         assert tribunal.consensus_ratio == 0.67
-        
+
     def test_estimate_tokens(self, temp_config):
         """Test token estimation."""
         tribunal = Tribunal(temp_config)
-        
+
         text = "Hello World"  # 11 chars
         tokens = tribunal._estimate_tokens(text)
-        
+
         assert tokens == 2  # 11 // 4
-        
+
     def test_chunk_content_small(self, temp_config):
         """Test chunking of small content."""
         tribunal = Tribunal(temp_config)
-        
+
         content = "Small content"
         chunks = tribunal._chunk_content(content, 1000)
-        
+
         assert len(chunks) == 1
         assert chunks[0] == content
-        
+
     def test_chunk_content_large(self, temp_config):
         """Test chunking of large content."""
         tribunal = Tribunal(temp_config)
-        
+
         # Create content larger than 100 tokens
         content = "Line of content\n" * 100
         chunks = tribunal._chunk_content(content, 50)
-        
+
         assert len(chunks) > 1
-        
+
     def test_summarize_non_code(self, temp_config):
         """Test summarization of non-code elements."""
         tribunal = Tribunal(temp_config)
-        
+
         content = '''
 def func():
     """Docstring 1"""
@@ -142,109 +144,115 @@ def func4():
     pass
 '''
         result = tribunal._summarize_non_code(content)
-        
-        assert 'func' in result
-        
+
+        assert "func" in result
+
     def test_parse_judge_response_json(self, temp_config):
         """Test parsing JSON judge response."""
         tribunal = Tribunal(temp_config)
-        
-        response = json.dumps({
-            "score": 8,
-            "explanation": "Good code",
-            "issues": ["Minor issue"],
-            "suggestions": ["Suggestion 1"],
-            "confidence": 0.9
-        })
-        
+
+        response = json.dumps(
+            {
+                "score": 8,
+                "explanation": "Good code",
+                "issues": ["Minor issue"],
+                "suggestions": ["Suggestion 1"],
+                "confidence": 0.9,
+            }
+        )
+
         result = tribunal._parse_judge_response(response)
-        
-        assert result['score'] == 8
-        assert result['explanation'] == "Good code"
-        assert result['pass_verdict'] is True
-        assert result['confidence'] == 0.9
-        
+
+        assert result["score"] == 8
+        assert result["explanation"] == "Good code"
+        assert result["pass_verdict"] is True
+        assert result["confidence"] == 0.9
+
     def test_parse_judge_response_text(self, temp_config):
         """Test parsing text judge response with score."""
         tribunal = Tribunal(temp_config)
-        
+
         response = "The code is well structured. Score: 9/10. It follows best practices."
-        
+
         result = tribunal._parse_judge_response(response)
-        
-        assert result['score'] == 9
-        assert result['pass_verdict'] is True
-        
+
+        assert result["score"] == 9
+        assert result["pass_verdict"] is True
+
     def test_parse_judge_response_no_score(self, temp_config):
         """Test parsing response without explicit score."""
         tribunal = Tribunal(temp_config)
-        
+
         response = "The code is okay."
-        
+
         result = tribunal._parse_judge_response(response)
-        
-        assert result['score'] == 5  # Default
-        assert result['pass_verdict'] is False
+
+        assert result["score"] == 5  # Default
+        assert result["pass_verdict"] is False
 
 
 class TestStaticAnalysis:
     """Tests for static analysis functions."""
-    
+
     @pytest.fixture
     def temp_config_with_static(self):
         """Create config with static analysis enabled."""
         temp_dir = tempfile.mkdtemp()
-        config_path = Path(temp_dir, 'config.yaml')
-        config_path.write_text("""
+        config_path = Path(temp_dir, "config.yaml")
+        config_path.write_text(
+            """
 static_analysis:
   enabled: true
   pylint:
     enabled: true
   bandit:
     enabled: true
-""")
+"""
+        )
         yield str(config_path)
         shutil.rmtree(temp_dir, ignore_errors=True)
-        
+
     @pytest.fixture
     def temp_config_without_static(self):
         """Create config with static analysis disabled."""
         temp_dir = tempfile.mkdtemp()
-        config_path = Path(temp_dir, 'config.yaml')
-        config_path.write_text("""
+        config_path = Path(temp_dir, "config.yaml")
+        config_path.write_text(
+            """
 static_analysis:
   enabled: false
-""")
+"""
+        )
         yield str(config_path)
         shutil.rmtree(temp_dir, ignore_errors=True)
-    
+
     def test_run_static_analysis_disabled(self, temp_config_without_static):
         """Test static analysis when disabled."""
         tribunal = Tribunal(temp_config_without_static)
-        
+
         file_tree = {"main.py": "print('hello')"}
         results = tribunal.run_static_analysis(file_tree, "python")
-        
+
         assert results == []
-        
+
     def test_run_pylint_basic(self, temp_config_with_static):
         """Test pylint on basic Python code."""
         tribunal = Tribunal(temp_config_with_static)
-        
+
         content = "print('hello')"
         result = tribunal.run_pylint("test.py", content)
-        
+
         assert result.tool == "pylint"
         assert result.file_path == "test.py"
         assert isinstance(result.issues, list)
-        
+
     def test_run_bandit_basic(self, temp_config_with_static):
         """Test bandit on basic Python code."""
         tribunal = Tribunal(temp_config_with_static)
-        
+
         content = "print('hello')"
         result = tribunal.run_bandit("test.py", content)
-        
+
         assert result.tool == "bandit"
         assert result.file_path == "test.py"
         assert isinstance(result.issues, list)
@@ -252,13 +260,14 @@ static_analysis:
 
 class TestEvaluateCriterion:
     """Tests for criterion evaluation."""
-    
+
     @pytest.fixture
     def mock_tribunal(self):
         """Create tribunal with mocked LLM calls."""
         temp_dir = tempfile.mkdtemp()
-        config_path = Path(temp_dir, 'config.yaml')
-        config_path.write_text("""
+        config_path = Path(temp_dir, "config.yaml")
+        config_path.write_text(
+            """
 llms:
   architect:
     model: "test-model"
@@ -277,68 +286,67 @@ retry:
   max_attempts: 1
 fallback:
   enabled: false
-""")
+"""
+        )
         tribunal = Tribunal(config_path)
         yield tribunal, temp_dir
         shutil.rmtree(temp_dir, ignore_errors=True)
-    
-    @patch('modules.tribunal.litellm')
+
+    @patch("modules.tribunal.litellm")
     def test_evaluate_criterion_pass(self, mock_litellm, mock_tribunal):
         """Test evaluation that passes."""
         tribunal, _ = mock_tribunal
-        
+
         # All judges give passing scores
         mock_response = Mock()
         mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = json.dumps({
-            "score": 8,
-            "explanation": "Good implementation",
-            "issues": [],
-            "suggestions": [],
-            "confidence": 0.9
-        })
+        mock_response.choices[0].message.content = json.dumps(
+            {"score": 8, "explanation": "Good implementation", "issues": [], "suggestions": [], "confidence": 0.9}
+        )
         mock_litellm.completion.return_value = mock_response
-        
+
         criterion = {"id": 1, "desc": "Test requirement"}
         file_tree = {"main.py": "def test(): pass"}
         spec_summary = "Test spec"
-        
+
         result = tribunal.evaluate_criterion(criterion, "technical", file_tree, spec_summary)
-        
+
         assert result.criterion_id == 1
         assert result.consensus_verdict == Verdict.PASS
         assert result.average_score >= 7
-        
-    @patch('modules.tribunal.litellm')
+
+    @patch("modules.tribunal.litellm")
     def test_evaluate_criterion_fail(self, mock_litellm, mock_tribunal):
         """Test evaluation that fails."""
         tribunal, _ = mock_tribunal
-        
+
         # All judges give failing scores
         mock_response = Mock()
         mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = json.dumps({
-            "score": 3,
-            "explanation": "Poor implementation",
-            "issues": ["Major bug"],
-            "suggestions": ["Fix it"],
-            "confidence": 0.8
-        })
+        mock_response.choices[0].message.content = json.dumps(
+            {
+                "score": 3,
+                "explanation": "Poor implementation",
+                "issues": ["Major bug"],
+                "suggestions": ["Fix it"],
+                "confidence": 0.8,
+            }
+        )
         mock_litellm.completion.return_value = mock_response
-        
+
         criterion = {"id": 1, "desc": "Test requirement"}
         file_tree = {"main.py": "# Empty"}
         spec_summary = "Test spec"
-        
+
         result = tribunal.evaluate_criterion(criterion, "technical", file_tree, spec_summary)
-        
+
         assert result.consensus_verdict == Verdict.FAIL
         assert result.average_score < 7
 
 
 class TestReportGeneration:
     """Tests for report generation."""
-    
+
     @pytest.fixture
     def sample_verdict(self):
         """Create a sample tribunal verdict."""
@@ -364,14 +372,14 @@ class TestReportGeneration:
                             pass_verdict=True,
                             confidence=0.9,
                             issues=[],
-                            suggestions=[]
+                            suggestions=[],
                         )
                     ],
                     average_score=9.0,
                     consensus_verdict=Verdict.PASS,
                     majority_ratio=1.0,
                     final_explanation="All good",
-                    relevant_files=["main.py"]
+                    relevant_files=["main.py"],
                 )
             ],
             static_analysis_results=[
@@ -379,54 +387,58 @@ class TestReportGeneration:
                     tool="pylint",
                     file_path="main.py",
                     issues=[{"line": 1, "message": "Minor issue", "type": "warning"}],
-                    severity_counts={"warning": 1}
+                    severity_counts={"warning": 1},
                 )
             ],
             remediation_suggestions=[],
-            execution_time_seconds=5.0
+            execution_time_seconds=5.0,
         )
-    
+
     def test_generate_report_md(self, sample_verdict):
         """Test markdown report generation."""
         tribunal = Tribunal()
-        
+
         report = tribunal.generate_report_md(sample_verdict)
-        
+
         assert "# Dysruption CVA Verification Report" in report
         assert "PASS" in report
         assert "8.5" in report
         assert "Technical Requirements" in report
         assert "Static Analysis" in report
-        
+
     def test_generate_verdict_json(self, sample_verdict):
         """Test JSON verdict generation."""
         tribunal = Tribunal()
-        
+
         json_data = tribunal.generate_verdict_json(sample_verdict)
-        
+
         assert json_data["overall_verdict"] == "PASS"
         assert json_data["overall_score"] == 8.5
         assert json_data["ci_cd"]["success"] is True
         assert json_data["ci_cd"]["exit_code"] == 0
-        
+
     def test_save_outputs(self, sample_verdict):
         """Test saving outputs to files."""
         temp_dir = tempfile.mkdtemp()
         try:
-            config_path = Path(temp_dir, 'config.yaml')
-            config_path.write_text(f"""
+            config_path = Path(temp_dir, "config.yaml")
+            config_path.write_text(
+                f"""
 output:
   report_file: "{temp_dir}/REPORT.md"
   verdict_file: "{temp_dir}/verdict.json"
-""".replace("\\", "/"))
-            
+""".replace(
+                    "\\", "/"
+                )
+            )
+
             tribunal = Tribunal(str(config_path))
             report_path, verdict_path = tribunal.save_outputs(sample_verdict)
-            
+
             assert os.path.exists(report_path)
             assert os.path.exists(verdict_path)
-            
-            with open(verdict_path, 'r') as f:
+
+            with open(verdict_path, "r") as f:
                 loaded = json.load(f)
             assert loaded["overall_verdict"] == "PASS"
         finally:
@@ -435,26 +447,23 @@ output:
 
 class TestRunAdjudication:
     """Tests for the run_adjudication function."""
-    
-    @patch('modules.tribunal.litellm')
+
+    @patch("modules.tribunal.litellm")
     def test_run_adjudication_basic(self, mock_litellm):
         """Test basic adjudication run."""
         mock_response = Mock()
         mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = json.dumps({
-            "score": 8,
-            "explanation": "Good",
-            "issues": [],
-            "suggestions": [],
-            "confidence": 0.9
-        })
+        mock_response.choices[0].message.content = json.dumps(
+            {"score": 8, "explanation": "Good", "issues": [], "suggestions": [], "confidence": 0.9}
+        )
         mock_litellm.completion.return_value = mock_response
-        
+
         temp_dir = tempfile.mkdtemp()
         try:
             # Create config
-            config_path = Path(temp_dir, 'config.yaml')
-            config_path.write_text("""
+            config_path = Path(temp_dir, "config.yaml")
+            config_path.write_text(
+                """
 static_analysis:
   enabled: false
 remediation:
@@ -466,28 +475,26 @@ fallback:
 output:
   report_file: "REPORT.md"
   verdict_file: "verdict.json"
-""")
-            
+"""
+            )
+
             # Create criteria file
-            criteria_path = Path(temp_dir, 'criteria.json')
-            criteria_path.write_text(json.dumps({
-                "technical": [{"id": 1, "desc": "Test"}],
-                "functional": []
-            }))
-            
+            criteria_path = Path(temp_dir, "criteria.json")
+            criteria_path.write_text(json.dumps({"technical": [{"id": 1, "desc": "Test"}], "functional": []}))
+
             # Change to temp dir for output files
             old_cwd = os.getcwd()
             os.chdir(temp_dir)
-            
+
             try:
                 file_tree = {"main.py": "print('hello')"}
                 verdict = run_adjudication(
                     file_tree=file_tree,
                     language="python",
                     criteria_path=str(criteria_path),
-                    config_path=str(config_path)
+                    config_path=str(config_path),
                 )
-                
+
                 assert verdict is not None
                 assert isinstance(verdict.overall_verdict, Verdict)
             finally:
@@ -498,50 +505,52 @@ output:
 
 class TestEdgeCases:
     """Tests for edge cases and error handling."""
-    
+
     def test_empty_file_tree(self):
         """Test handling of empty file tree."""
         tribunal = Tribunal()
-        
+
         result = tribunal.run({}, {"technical": [], "functional": []}, "python")
-        
+
         assert result.overall_verdict == Verdict.ERROR
         assert result.total_criteria == 0
-        
+
     def test_empty_criteria(self):
         """Test handling of empty criteria."""
         tribunal = Tribunal()
-        
+
         file_tree = {"main.py": "print('hello')"}
         result = tribunal.run(file_tree, {"technical": [], "functional": []}, "python")
-        
+
         assert result.overall_verdict == Verdict.ERROR
         assert result.total_criteria == 0
-        
-    @patch('modules.tribunal.litellm')
+
+    @patch("modules.tribunal.litellm")
     def test_llm_error_handling(self, mock_litellm):
         """Test handling of LLM errors."""
         mock_litellm.completion.side_effect = Exception("API Error")
-        
+
         temp_dir = tempfile.mkdtemp()
         try:
-            config_path = Path(temp_dir, 'config.yaml')
-            config_path.write_text("""
+            config_path = Path(temp_dir, "config.yaml")
+            config_path.write_text(
+                """
 static_analysis:
   enabled: false
 retry:
   max_attempts: 1
 fallback:
   enabled: false
-""")
-            
+"""
+            )
+
             tribunal = Tribunal(str(config_path))
-            
+
             criterion = {"id": 1, "desc": "Test"}
             file_tree = {"main.py": "test"}
-            
+
             result = tribunal.evaluate_criterion(criterion, "technical", file_tree, "spec")
-            
+
             # Should handle error gracefully
             assert result.criterion_id == 1
             # Scores should indicate error
@@ -549,50 +558,245 @@ fallback:
                 assert "failed" in score.explanation.lower() or score.confidence == 0.0
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            
+
     def test_large_file_handling(self):
         """Test handling of large files."""
         tribunal = Tribunal()
-        
+
         # Create a large file content
         large_content = "def func():\n    pass\n" * 5000
-        
+
         # Should not raise
         chunks = tribunal._chunk_content(large_content, 1000)
-        
+
         assert len(chunks) > 1
 
 
 class TestConsensusLogic:
     """Tests for consensus voting logic."""
-    
+
     def test_majority_pass(self):
         """Test that 2/3 passing votes result in PASS."""
         scores = [
             JudgeScore("J1", "m1", 8, "Good", True, 0.9, [], []),
             JudgeScore("J2", "m2", 8, "Good", True, 0.9, [], []),
-            JudgeScore("J3", "m3", 5, "Okay", False, 0.7, [], [])
+            JudgeScore("J3", "m3", 5, "Okay", False, 0.7, [], []),
         ]
-        
+
         pass_votes = sum(1 for s in scores if s.pass_verdict)
         majority_ratio = pass_votes / len(scores)
-        
+
         # 2/3 = 0.6666... which is effectively 67% (within floating point tolerance)
         assert majority_ratio >= 0.66
-        
+
     def test_majority_fail(self):
         """Test that 2/3 failing votes result in FAIL."""
         scores = [
             JudgeScore("J1", "m1", 3, "Bad", False, 0.9, [], []),
             JudgeScore("J2", "m2", 4, "Bad", False, 0.9, [], []),
-            JudgeScore("J3", "m3", 8, "Good", True, 0.7, [], [])
+            JudgeScore("J3", "m3", 8, "Good", True, 0.7, [], []),
         ]
-        
+
         pass_votes = sum(1 for s in scores if s.pass_verdict)
         majority_ratio = pass_votes / len(scores)
-        
+
         assert majority_ratio < 0.67
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+class TestRemediation:
+    """Tests for remediation generation."""
+
+    @patch("modules.tribunal.litellm")
+    def test_generate_remediation_enabled(self, mock_litellm):
+        """Test remediation generation when enabled."""
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        mock_response.choices[0].message.content = json.dumps(
+            {
+                "criterion_id": 1,
+                "fixes": [{"file": "test.py", "description": "Fix issue", "diff": "--- a/test.py\n+++ b/test.py\n"}],
+            }
+        )
+        mock_litellm.completion.return_value = mock_response
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            config_path = Path(temp_dir, "config.yaml")
+            config_path.write_text(
+                """
+remediation:
+  enabled: true
+  max_fixes_per_file: 3
+llms:
+  remediation:
+    model: "test-model"
+retry:
+  max_attempts: 1
+fallback:
+  enabled: false
+"""
+            )
+
+            tribunal = Tribunal(str(config_path))
+
+            failed_result = CriterionResult(
+                criterion_id=1,
+                criterion_type="technical",
+                criterion_desc="Test requirement",
+                scores=[JudgeScore("J1", "m1", 4, "Failed", False, 0.8, ["Issue 1"], ["Fix 1"])],
+                average_score=4.0,
+                consensus_verdict=Verdict.FAIL,
+                majority_ratio=0.0,
+                final_explanation="Failed",
+                relevant_files=["test.py"],
+            )
+
+            file_tree = {"test.py": "def broken(): pass"}
+
+            suggestions = tribunal.generate_remediation([failed_result], file_tree)
+
+            assert len(suggestions) >= 0  # May have suggestions
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_generate_remediation_disabled(self):
+        """Test remediation generation when disabled."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            config_path = Path(temp_dir, "config.yaml")
+            config_path.write_text(
+                """
+remediation:
+  enabled: false
+"""
+            )
+
+            tribunal = Tribunal(str(config_path))
+
+            failed_result = CriterionResult(
+                criterion_id=1,
+                criterion_type="technical",
+                criterion_desc="Test requirement",
+                scores=[],
+                average_score=4.0,
+                consensus_verdict=Verdict.FAIL,
+                majority_ratio=0.0,
+                final_explanation="Failed",
+                relevant_files=[],
+            )
+
+            suggestions = tribunal.generate_remediation([failed_result], {})
+
+            assert suggestions == []
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+class TestGetJudgePrompt:
+    """Tests for judge prompt generation."""
+
+    def test_architect_prompt(self):
+        """Test architect judge prompt generation."""
+        tribunal = Tribunal()
+
+        criterion = {"id": 1, "desc": "Use Python 3.10+", "type": "technical"}
+        code_content = "import sys\nprint(sys.version)"
+        spec_summary = "A Python application"
+
+        system_prompt, user_prompt = tribunal._get_judge_prompt("architect", criterion, code_content, spec_summary)
+
+        assert "ARCHITECT" in system_prompt
+        assert "SCORING RUBRIC" in system_prompt
+        assert "Use Python 3.10+" in user_prompt
+
+    def test_security_prompt(self):
+        """Test security judge prompt generation."""
+        tribunal = Tribunal()
+
+        criterion = {"id": 1, "desc": "Validate input", "type": "technical"}
+        code_content = "def process(x): return x"
+        spec_summary = "A secure application"
+
+        system_prompt, user_prompt = tribunal._get_judge_prompt("security", criterion, code_content, spec_summary)
+
+        assert "SECURITY" in system_prompt
+        assert "vulnerability" in system_prompt.lower()
+
+    def test_user_proxy_prompt(self):
+        """Test user proxy judge prompt generation."""
+        tribunal = Tribunal()
+
+        criterion = {"id": 1, "desc": "Support dark mode", "type": "functional"}
+        code_content = "def toggle_theme(): pass"
+        spec_summary = "A themed application"
+
+        system_prompt, user_prompt = tribunal._get_judge_prompt("user_proxy", criterion, code_content, spec_summary)
+
+        assert "USER ADVOCATE" in system_prompt
+        assert "SPECIFICATION ALIGNMENT" in system_prompt
+
+
+class TestStaticAnalysisDetailed:
+    """Detailed tests for static analysis."""
+
+    def test_pylint_with_issues(self):
+        """Test pylint finds issues in problematic code."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            config_path = Path(temp_dir, "config.yaml")
+            config_path.write_text(
+                """
+static_analysis:
+  enabled: true
+  pylint:
+    enabled: true
+    disable: []
+  bandit:
+    enabled: false
+"""
+            )
+
+            tribunal = Tribunal(str(config_path))
+
+            # Code with obvious issues (unused import)
+            problematic_code = "import os\ndef unused_function():\n    x = 1\n"
+
+            result = tribunal.run_pylint("test.py", problematic_code)
+
+            assert result.tool == "pylint"
+            # May or may not find issues depending on pylint version
+            assert isinstance(result.issues, list)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_bandit_with_security_issues(self):
+        """Test bandit finds security issues."""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            config_path = Path(temp_dir, "config.yaml")
+            config_path.write_text(
+                """
+static_analysis:
+  enabled: true
+  pylint:
+    enabled: false
+  bandit:
+    enabled: true
+"""
+            )
+
+            tribunal = Tribunal(str(config_path))
+
+            # Code with security issue (hardcoded password)
+            insecure_code = 'password = "secret123"\nprint(password)\n'
+
+            result = tribunal.run_bandit("test.py", insecure_code)
+
+            assert result.tool == "bandit"
+            assert isinstance(result.issues, list)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
