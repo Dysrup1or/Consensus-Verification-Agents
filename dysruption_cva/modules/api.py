@@ -181,11 +181,18 @@ class WebSocketManager:
 
     async def connect(self, websocket: WebSocket, run_id: str) -> None:
         """Accept and register a WebSocket connection."""
+        # Log handshake details
+        logger.info(f"🧨 [WS-HANDSHAKE] Attempting accept for run_id={run_id}")
+        logger.info(f"🧨 [WS-HANDSHAKE] Client: {websocket.client}")
+        logger.info(f"🧨 [WS-HANDSHAKE] Headers: {dict(websocket.headers)}")
+        
         await websocket.accept()
+        logger.info(f"🧨 [WS-HANDSHAKE] ACCEPTED SUCCESSFULLY for {run_id}")
+        
         if run_id not in self.active_connections:
             self.active_connections[run_id] = set()
         self.active_connections[run_id].add(websocket)
-        logger.info(f"WebSocket connected for run {run_id}")
+        logger.info(f"WebSocket connected for run {run_id} (total: {len(self.active_connections[run_id])} connections)")
 
     def disconnect(self, websocket: WebSocket, run_id: str) -> None:
         """Remove a WebSocket connection."""
@@ -1116,7 +1123,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "modules.api:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,  # Must match frontend .env.local
         reload=True,
         log_level="info",
     )

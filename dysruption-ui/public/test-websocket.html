@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CVA WebSocket Direct Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background: #1a1a2e; color: #eee; }
+        h1 { color: #00ff88; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; background: #16213e; color: #eee; border: 1px solid #00ff88; }
+        button:hover { background: #0f3460; }
+        #status { font-size: 24px; padding: 20px; margin: 20px 0; border-radius: 8px; }
+        .connecting { background: #ffa500; color: #000; }
+        .connected { background: #00ff88; color: #000; }
+        .error { background: #ff4444; }
+        .closed { background: #666; }
+        #messages { border: 1px solid #00ff88; height: 300px; overflow: auto; padding: 10px; background: #0f0f1a; font-family: monospace; font-size: 12px; }
+        .msg { margin: 5px 0; padding: 5px; border-bottom: 1px solid #333; }
+        .msg-recv { color: #00ff88; }
+        .msg-sent { color: #00aaff; }
+        .msg-error { color: #ff4444; }
+        .msg-info { color: #ffaa00; }
+        #controls { margin: 20px 0; }
+        input { padding: 10px; width: 200px; background: #16213e; color: #eee; border: 1px solid #00ff88; }
+    </style>
+</head>
+<body>
+    <h1>🔌 CVA WebSocket Direct Test</h1>
+    <p>This page tests WebSocket connectivity directly, bypassing React.</p>
+    
+    <div id="controls">
+        <input type="text" id="runId" placeholder="Run ID" value="test_direct_123">
+        <button onclick="connectWebSocket()">🔗 Connect WebSocket</button>
+        <button onclick="sendPing()">📤 Send Ping</button>
+        <button onclick="closeWebSocket()">❌ Close</button>
+        <button onclick="clearMessages()">🗑️ Clear Log</button>
+    </div>
+    
+    <div id="status" class="closed">Status: Not connected</div>
+    
+    <h3>📋 Connection Log:</h3>
+    <div id="messages"></div>
+    
+    <h3>🔧 Debug Info:</h3>
+    <pre id="debug"></pre>
+    
+    <script>
+        let ws = null;
+        let pingInterval = null;
+        
+        function log(msg, type = 'info') {
+            const div = document.getElementById('messages');
+            const time = new Date().toISOString().split('T')[1].slice(0, 12);
+            div.innerHTML += `<div class="msg msg-${type}">[${time}] ${msg}</div>`;
+            div.scrollTop = div.scrollHeight;
+            console.log(`[WS-TEST] ${msg}`);
+        }
+        
+        function updateStatus(status, text) {
+            const el = document.getElementById('status');
+            el.className = status;
+            el.textContent = `Status: ${text}`;
+        }
+        
+        function updateDebug() {
+            const debug = document.getElementById('debug');
+            const info = {
+                wsExists: !!ws,
+                readyState: ws ? ws.readyState : 'N/A',
+                readyStateName: ws ? ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] : 'N/A',
+                url: ws ? ws.url : 'N/A',
+                protocol: ws ? ws.protocol : 'N/A',
+                extensions: ws ? ws.extensions : 'N/A',
+                bufferedAmount: ws ? ws.bufferedAmount : 'N/A',
+                binaryType: ws ? ws.binaryType : 'N/A'
+            };
+            debug.textContent = JSON.stringify(info, null, 2);
+        }
+        
+        function connectWebSocket() {
+            if (ws) {
+                log('Closing existing connection first...', 'info');
+                ws.close();
+                ws = null;
+            }
+            
+            const runId = document.getElementById('runId').value || 'test_' + Date.now();
+            const url = `ws://localhost:8001/ws/${runId}`;
+            
+            log(`🔗 Attempting connection to: ${url}`, 'info');
+            updateStatus('connecting', `Connecting to ${url}...`);
+            
+            try {
+                ws = new WebSocket(url);
+                log(`WebSocket object created, readyState: ${ws.readyState} (CONNECTING)`, 'info');
+                updateDebug();
+                
+                ws.onopen = function(event) {
+                    log('✅ WebSocket OPENED successfully!', 'recv');
+                    log(`readyState changed to: ${ws.readyState} (OPEN)`, 'info');
+                    updateStatus('connected', `CONNECTED to ${url}`);
+                    updateDebug();
+                    
+                    // Send handshake message
+                    const handshake = JSON.stringify({
+                        type: 'browser_handshake',
+                        timestamp: Date.now(),
+                        userAgent: navigator.userAgent.slice(0, 50)
+                    });
+                    ws.send(handshake);
+                    log(`📤 Sent handshake: ${handshake}`, 'sent');
+                };
+                
+                ws.onerror = function(event) {
+                    log('❌ WebSocket ERROR occurred', 'error');
+                    log(`Error event type: ${event.type}`, 'error');
+                    // Note: onerror doesn't provide error details in browsers for security
+                    console.error('Full error event:', event);
+                    updateStatus('error', 'ERROR - check browser console (F12)');
+                    updateDebug();
+                };
+                
+                ws.onclose = function(event) {
+                    log(`🔌 WebSocket CLOSED`, 'info');
+                    log(`  Code: ${event.code}`, 'info');
+                    log(`  Reason: "${event.reason || '(none)'}"`, 'info');
+                    log(`  WasClean: ${event.wasClean}`, 'info');
+                    
+                    // Decode common close codes
+                    const closeCodeMeanings = {
+                        1000: 'Normal closure',
+                        1001: 'Going away',
+                        1002: 'Protocol error',
+                        1003: 'Unsupported data',
+                        1005: 'No status received',
+                        1006: 'Abnormal closure (connection dropped)',
+                        1007: 'Invalid payload',
+                        1008: 'Policy violation',
+                        1009: 'Message too big',
+                        1010: 'Extension required',
+                        1011: 'Internal server error',
+                        1015: 'TLS handshake failure'
+                    };
+                    log(`  Meaning: ${closeCodeMeanings[event.code] || 'Unknown code'}`, 'info');
+                    
+                    updateStatus('closed', `CLOSED (code: ${event.code})`);
+                    updateDebug();
+                    ws = null;
+                };
+                
+                ws.onmessage = function(event) {
+                    log(`📨 RECEIVED: ${event.data}`, 'recv');
+                    updateDebug();
+                    
+                    try {
+                        const data = JSON.parse(event.data);
+                        log(`   Parsed type: ${data.type}`, 'recv');
+                        if (data.progress !== undefined) {
+                            log(`   Progress: ${data.progress}%`, 'recv');
+                        }
+                    } catch (e) {
+                        log(`   (Not JSON: ${e.message})`, 'info');
+                    }
+                };
+                
+            } catch (e) {
+                log(`❌ Exception creating WebSocket: ${e.message}`, 'error');
+                console.error('WebSocket creation error:', e);
+                updateStatus('error', `Exception: ${e.message}`);
+            }
+        }
+        
+        function sendPing() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const ping = JSON.stringify({ type: 'ping', time: Date.now() });
+                ws.send(ping);
+                log(`📤 Sent: ${ping}`, 'sent');
+            } else {
+                log('⚠️ Cannot send - WebSocket not open', 'error');
+                log(`   Current readyState: ${ws ? ws.readyState : 'null'}`, 'error');
+            }
+        }
+        
+        function closeWebSocket() {
+            if (ws) {
+                log('Manually closing WebSocket...', 'info');
+                ws.close(1000, 'User requested close');
+            } else {
+                log('No WebSocket to close', 'info');
+            }
+        }
+        
+        function clearMessages() {
+            document.getElementById('messages').innerHTML = '';
+        }
+        
+        // Update debug info periodically
+        setInterval(updateDebug, 1000);
+        
+        // Initial debug update
+        updateDebug();
+        
+        log('🚀 Test page loaded. Click "Connect WebSocket" to test.', 'info');
+        log(`Browser: ${navigator.userAgent.slice(0, 80)}...`, 'info');
+    </script>
+</body>
+</html>
