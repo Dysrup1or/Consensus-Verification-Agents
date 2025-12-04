@@ -69,12 +69,14 @@ export class CVAWebSocket {
     if (!this.runId) return;
 
     const url = `${this.baseUrl}/${this.runId}`;
+    console.log(`🌐 [WS] Connecting to: ${url}`);
     this.notifyStatus('connecting');
 
     try {
       this.ws = new WebSocket(url);
 
       this.ws.onopen = () => {
+        console.log(`✅ [WS] Connected to ${url}`);
         this.reconnectAttempts = 0;
         this.notifyStatus('connected');
         this.startPing();
@@ -83,15 +85,17 @@ export class CVAWebSocket {
       this.ws.onmessage = (e) => {
         try {
           const msg: WSMessage = JSON.parse(e.data);
+          console.log(`📨 [WS] Received:`, msg.type, msg);
           // Handle pong silently
           if (msg.type === 'pong' || msg.type === 'ping') return;
           this.messageHandlers.forEach((h) => h(msg));
         } catch (err) {
-          // Silent fail for parse errors
+          console.error(`❌ [WS] Parse error:`, err);
         }
       };
 
       this.ws.onclose = (event) => {
+        console.log(`🔌 [WS] Closed: code=${event.code}, reason=${event.reason}`);
         this.stopPing();
         this.notifyStatus('disconnected');
         if (this.shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
@@ -99,10 +103,12 @@ export class CVAWebSocket {
         }
       };
 
-      this.ws.onerror = () => {
+      this.ws.onerror = (event) => {
+        console.error(`❌ [WS] Error:`, event);
         this.ws?.close();
       };
     } catch (e) {
+      console.error(`❌ [WS] Connection exception:`, e);
       this.scheduleReconnect();
     }
   }

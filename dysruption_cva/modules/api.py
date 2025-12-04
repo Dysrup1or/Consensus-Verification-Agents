@@ -1007,7 +1007,16 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
     Connect to receive live updates for a verification run.
     Messages are sent as JSON with types: 'progress', 'verdict', 'error'.
     """
-    await ws_manager.connect(websocket, run_id)
+    logger.info(f"🔌 [WS] Connection attempt for run_id: {run_id}")
+    
+    try:
+        await ws_manager.connect(websocket, run_id)
+        logger.info(f"✅ [WS] Connection ACCEPTED for run_id: {run_id}")
+    except Exception as e:
+        logger.error(f"❌ [WS] Connection FAILED for {run_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        return
 
     try:
         # Send current state immediately
@@ -1024,6 +1033,15 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
                 },
             )
             await websocket.send_text(initial_message.model_dump_json())
+            logger.info(f"📤 [WS] Sent initial state for {run_id}")
+        else:
+            # Send acknowledgment even if no run exists yet
+            await websocket.send_text(json.dumps({
+                "type": "connected",
+                "run_id": run_id,
+                "message": "WebSocket connected, waiting for run to start"
+            }))
+            logger.info(f"📤 [WS] Sent connection ack for {run_id} (no run exists yet)")
 
         # Keep connection alive and handle incoming messages
         while True:
@@ -1050,12 +1068,16 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
                         json.dumps({"type": "ping", "run_id": run_id})
                     )
                 except Exception:
+                    logger.warning(f"🔌 [WS] Keepalive failed for {run_id}, closing")
                     break
 
     except WebSocketDisconnect:
+        logger.info(f"🔌 [WS] Client disconnected: {run_id}")
         ws_manager.disconnect(websocket, run_id)
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.error(f"❌ [WS] Error for {run_id}: {e}")
+        import traceback
+        traceback.print_exc()
         ws_manager.disconnect(websocket, run_id)
 
 
