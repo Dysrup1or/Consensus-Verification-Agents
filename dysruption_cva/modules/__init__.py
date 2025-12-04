@@ -1,5 +1,5 @@
 # Dysruption CVA Modules
-# Version: 1.1 - FastAPI Backend with Veto Protocol
+# Version: 2.0 - Rate Limit Resilient with Refinement
 
 # Core modules
 from .watcher import DirectoryWatcher, run_watcher
@@ -10,6 +10,15 @@ from .watcher_v2 import (
 )
 from .parser import ConstitutionParser, run_extraction
 from .tribunal import Tribunal, run_adjudication, Verdict
+
+# Refinement module (new in v2.0)
+from .refinement import (
+    ReportParser,
+    RefinementGenerator,
+    RefinementPrompt,
+    analyze_and_refine,
+    save_refinement_prompt,
+)
 
 # Pydantic schemas
 from .schemas import (
@@ -56,6 +65,12 @@ __all__ = [
     "Tribunal",
     "run_adjudication",
     "Verdict",
+    # Refinement (v2.0)
+    "ReportParser",
+    "RefinementGenerator",
+    "RefinementPrompt",
+    "analyze_and_refine",
+    "save_refinement_prompt",
     # Schemas
     "FileNode",
     "FileTree",

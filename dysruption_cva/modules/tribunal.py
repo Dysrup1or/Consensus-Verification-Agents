@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -39,11 +40,35 @@ from .schemas import (
 
 try:
     import litellm
+    # Enable LiteLLM caching if Redis available
+    try:
+        import redis
+        litellm.cache = litellm.Cache(type="redis", host="localhost", port=6379)
+        logger.info("LiteLLM Redis cache enabled")
+    except Exception:
+        logger.debug("Redis not available, using in-memory cache")
+        litellm.cache = litellm.Cache(type="local")
 
     LITELLM_AVAILABLE = True
 except ImportError:
     LITELLM_AVAILABLE = False
     logger.error("LiteLLM not available. Install with: pip install litellm")
+
+
+# Rate limit error types to catch
+RATE_LIMIT_ERRORS = (
+    "RateLimitError",
+    "GroqException",
+    "APIError",
+    "ServiceUnavailable",
+)
+
+# Credit/quota related errors
+CREDIT_ERRORS = (
+    "credit balance too low",
+    "insufficient_quota",
+    "billing",
+)
 
 
 # Veto Protocol Constants
@@ -457,13 +482,13 @@ class Tribunal:
         self.max_attempts = self.retry_config.get("max_attempts", 3)
         self.backoff_seconds = self.retry_config.get("backoff_seconds", 2)
 
-        # Judge configurations - v1.1 uses new models with JudgeRole
+        # Judge configurations - v2.0 uses rate-limit-resilient models
         self.judges = {
             "architect": {
-                "name": "Architect Judge (Claude 4 Sonnet)",
+                "name": "Architect Judge (Claude Sonnet 4)",
                 "role": JudgeRole.ARCHITECT,
                 "model": self.llms_config.get("architect", {}).get(
-                    "model", "anthropic/claude-4-sonnet-20250514"
+                    "model", "anthropic/claude-sonnet-4-20250514"
                 ),
                 "description": "architecture, design patterns, and logic correctness",
                 "weight": 1.2,  # Slightly higher weight for architecture
@@ -479,10 +504,10 @@ class Tribunal:
                 "veto_enabled": SECURITY_VETO_ENABLED,
             },
             "user_proxy": {
-                "name": "User Proxy Judge (Gemini 2.5 Pro)",
+                "name": "User Proxy Judge (Gemini 2.0 Flash)",
                 "role": JudgeRole.USER_PROXY,
                 "model": self.llms_config.get("user_proxy", {}).get(
-                    "model", "google/gemini-2.5-pro-exp-03-25"
+                    "model", "gemini/gemini-2.0-flash-exp"
                 ),
                 "description": "user intent alignment and specification compliance",
                 "weight": 1.0,
@@ -614,7 +639,7 @@ class Tribunal:
                     cmd.append(f"--disable={disable_str}")
                 cmd.append(temp_path)
 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
                 if result.stdout:
                     try:
@@ -698,7 +723,7 @@ class Tribunal:
                 # Run bandit
                 cmd = ["python", "-m", "bandit", "-f", "json", temp_path]
 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
                 if result.stdout:
                     try:
@@ -752,10 +777,10 @@ class Tribunal:
         )
 
     def run_static_analysis(
-        self, file_tree: Dict[str, str], language: str
+        self, file_tree: Dict[str, str], language: str, max_files: int = 50
     ) -> Tuple[List[StaticAnalysisFileResult], bool, Optional[str]]:
         """
-        Run static analysis on all files.
+        Run static analysis on files (limited to max_files to prevent hangs).
         Returns: (results, should_abort, abort_reason)
 
         Implements fail-fast: if critical issues found and fail_fast_enabled,
@@ -770,10 +795,23 @@ class Tribunal:
             logger.info("Static analysis disabled in config")
             return results, False, None
 
-        logger.info(f"Running static analysis on {len(file_tree)} files...")
+        # Filter Python files
+        python_files = [(p, c) for p, c in file_tree.items() if p.endswith(".py")]
+        total_files = len(python_files)
+        
+        # Limit to prevent extremely long runs
+        if total_files > max_files:
+            logger.warning(f"Limiting static analysis to {max_files} of {total_files} Python files")
+            python_files = python_files[:max_files]
+        
+        logger.info(f"Running static analysis on {len(python_files)} Python files...")
 
-        for file_path, content in file_tree.items():
-            if language == "python" and file_path.endswith(".py"):
+        for idx, (file_path, content) in enumerate(python_files):
+            if language == "python":
+                # Log progress every 10 files
+                if idx > 0 and idx % 10 == 0:
+                    logger.info(f"Static analysis progress: {idx}/{len(python_files)} files")
+                
                 pylint_result = self.run_pylint(file_path, content)
                 results.append(pylint_result)
 
@@ -804,41 +842,113 @@ class Tribunal:
         return results, should_abort, abort_reason
 
     def _call_llm(self, model: str, messages: List[Dict], max_tokens: int = 4096) -> Optional[str]:
-        """Call LLM with retry logic and fallback."""
+        """
+        Call LLM with enhanced retry logic, exponential backoff, jitter, and multi-tier fallback.
+        
+        Features:
+        - 5 retry attempts with exponential backoff (2s, 4s, 8s, 16s, 32s)
+        - Random jitter (1-10s) to avoid thundering herd
+        - Multi-tier fallback chain
+        - Credit/rate limit error detection with alerts
+        - Response caching via LiteLLM Redis cache
+        """
         if not LITELLM_AVAILABLE:
             raise RuntimeError("LiteLLM not available")
 
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                logger.debug(f"LLM call to {model} (attempt {attempt}/{self.max_attempts})")
+        # Get retry config
+        max_attempts = self.retry_config.get("max_attempts", 5)
+        base_backoff = self.retry_config.get("backoff_seconds", 2)
+        backoff_multiplier = self.retry_config.get("backoff_multiplier", 2)
+        max_backoff = self.retry_config.get("max_backoff_seconds", 60)
+        jitter_range = self.retry_config.get("jitter_range", [1, 10])
+        
+        # Get fallback models
+        fallback_models = self.fallback_config.get("models", [])
+        if not fallback_models:
+            legacy_model = self.fallback_config.get("model")
+            if legacy_model:
+                fallback_models = [legacy_model]
+        
+        # Build model chain: primary + fallbacks
+        model_chain = [model] + [m for m in fallback_models if m != model]
+        
+        last_error = None
+        
+        for model_idx, current_model in enumerate(model_chain):
+            is_fallback = model_idx > 0
+            if is_fallback:
+                logger.warning(f"Switching to fallback model {model_idx}: {current_model}")
+            
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    logger.debug(f"LLM call to {current_model} (attempt {attempt}/{max_attempts})")
 
-                response = litellm.completion(model=model, messages=messages, max_tokens=max_tokens, temperature=0.1)
+                    response = litellm.completion(
+                        model=current_model, 
+                        messages=messages, 
+                        max_tokens=max_tokens, 
+                        temperature=0.1,
+                        timeout=60,  # 60 second timeout
+                    )
 
-                content = response.choices[0].message.content
-                return content
+                    content = response.choices[0].message.content
+                    
+                    if is_fallback:
+                        logger.info(f"Fallback model {current_model} succeeded")
+                    
+                    return content
 
-            except Exception as e:
-                logger.warning(f"LLM call to {model} failed (attempt {attempt}): {e}")
+                except Exception as e:
+                    error_str = str(e)
+                    error_type = type(e).__name__
+                    last_error = e
+                    
+                    # Check for credit/billing errors (don't retry, switch immediately)
+                    is_credit_error = any(
+                        credit_msg in error_str.lower() 
+                        for credit_msg in CREDIT_ERRORS
+                    )
+                    if is_credit_error:
+                        logger.error(
+                            f"💳 CREDIT ALERT: {current_model} - {error_str[:100]}"
+                        )
+                        break  # Switch to next model immediately
+                    
+                    # Check for rate limit errors
+                    is_rate_limit = (
+                        error_type in RATE_LIMIT_ERRORS or
+                        "rate" in error_str.lower() or
+                        "limit" in error_str.lower() or
+                        "429" in error_str
+                    )
+                    
+                    if is_rate_limit:
+                        logger.warning(
+                            f"⚠️ RATE LIMIT: {current_model} (attempt {attempt}/{max_attempts})"
+                        )
+                    else:
+                        logger.warning(
+                            f"LLM error ({error_type}): {error_str[:100]}..."
+                        )
 
-                if attempt < self.max_attempts:
-                    time.sleep(self.backoff_seconds * attempt)
-                else:
-                    # Try fallback
-                    if self.fallback_config.get("enabled", True):
-                        fallback_model = self.fallback_config.get("model")
-                        if fallback_model and fallback_model != model:
-                            logger.info(f"Trying fallback model: {fallback_model}")
-                            try:
-                                response = litellm.completion(
-                                    model=fallback_model, messages=messages, max_tokens=max_tokens, temperature=0.1
-                                )
-                                return response.choices[0].message.content
-                            except Exception as fallback_error:
-                                logger.error(f"Fallback also failed: {fallback_error}")
-
-                    raise
-
-        return None
+                    if attempt < max_attempts:
+                        # Calculate backoff with jitter
+                        backoff = min(
+                            base_backoff * (backoff_multiplier ** (attempt - 1)),
+                            max_backoff
+                        )
+                        jitter = random.uniform(jitter_range[0], jitter_range[1])
+                        sleep_time = backoff + jitter
+                        
+                        logger.info(f"Retrying in {sleep_time:.1f}s (backoff={backoff:.0f}s + jitter={jitter:.1f}s)")
+                        time.sleep(sleep_time)
+            
+            # If we exhausted retries for this model, try next in chain
+            logger.warning(f"Exhausted retries for {current_model}, trying next model...")
+        
+        # All models failed
+        logger.error(f"All models in fallback chain failed. Last error: {last_error}")
+        raise last_error if last_error else RuntimeError("All LLM models failed")
 
     def _parse_judge_response(self, response: str) -> Dict[str, Any]:
         """Parse judge response to extract score and details."""
@@ -1201,6 +1311,7 @@ Output valid JSON with the structure:
         file_tree: Dict[str, str],
         criteria: Dict[str, List[Dict]],
         language: str = "python",
+        precomputed_static_results: Optional[Tuple[List[StaticAnalysisFileResult], bool, Optional[str]]] = None,
     ) -> TribunalVerdict:
         """
         Main adjudication pipeline with Veto Protocol and Fail-Fast support.
@@ -1209,6 +1320,8 @@ Output valid JSON with the structure:
             file_tree: Dict of file paths to content
             criteria: Extracted invariants (security, functionality, style)
             language: Detected language
+            precomputed_static_results: Optional tuple of (results, should_abort, abort_reason) 
+                                      to skip re-running analysis.
 
         Returns:
             TribunalVerdict with all results including veto status
@@ -1220,9 +1333,13 @@ Output valid JSON with the structure:
         logger.info("=" * 60)
 
         # Run static analysis first with fail-fast check
-        static_results, should_abort, abort_reason = self.run_static_analysis(
-            file_tree, language
-        )
+        if precomputed_static_results:
+            logger.info("Using precomputed static analysis results (skipping re-run)")
+            static_results, should_abort, abort_reason = precomputed_static_results
+        else:
+            static_results, should_abort, abort_reason = self.run_static_analysis(
+                file_tree, language
+            )
 
         # Handle fail-fast abort
         if should_abort:

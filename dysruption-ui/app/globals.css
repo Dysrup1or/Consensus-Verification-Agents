@@ -1,17 +1,20 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --foreground-rgb: 255, 255, 255;
-  --background-start-rgb: 10, 10, 10;
-  --background-end-rgb: 10, 10, 10;
+  --foreground-rgb: 241, 245, 249;
+  --background-rgb: 2, 6, 23;
 }
 
 body {
   color: rgb(var(--foreground-rgb));
-  background: rgb(var(--background-start-rgb));
-  font-family: 'JetBrains Mono', monospace;
+  background: rgb(var(--background-rgb));
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 @layer utilities {
@@ -20,34 +23,46 @@ body {
   }
 }
 
-/* Custom scrollbar for cyberpunk feel */
+/* Professional scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #1a1a1a; 
+  background: rgb(15, 23, 42);
 }
 ::-webkit-scrollbar-thumb {
-  background: #333; 
+  background: rgb(51, 65, 85);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #00FFFF; 
+  background: rgb(59, 130, 246);
 }
 
+/* Focus styles */
+*:focus-visible {
+  outline: 2px solid rgb(59, 130, 246);
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background: rgba(59, 130, 246, 0.3);
+}
+
+/* Pulsing animation for alerts */
 .pulsing-border {
-  animation: pulse-red 2s infinite;
+  animation: pulse-danger 2s infinite;
 }
 
-@keyframes pulse-red {
+@keyframes pulse-danger {
   0% {
-    box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.7);
+    box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.5);
   }
   70% {
-    box-shadow: 0 0 0 10px rgba(255, 77, 79, 0);
+    box-shadow: 0 0 0 8px rgba(244, 63, 94, 0);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(255, 77, 79, 0);
+    box-shadow: 0 0 0 0 rgba(244, 63, 94, 0);
   }
 }

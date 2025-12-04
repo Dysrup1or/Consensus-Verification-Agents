@@ -37,7 +37,8 @@ if (-not $SkipPreflight) {
         Write-Host "Preflight failed. Use -SkipPreflight to bypass (not recommended)." -ForegroundColor Red
         exit 1
     }
-} else {
+}
+else {
     Write-Host "[1/4] Preflight Checks SKIPPED" -ForegroundColor DarkGray
 }
 
@@ -54,7 +55,8 @@ if (Test-Path $envFile) {
         }
     }
     Write-Host "  Loaded API keys from .env" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "  Warning: .env file not found" -ForegroundColor Yellow
 }
 
@@ -64,7 +66,7 @@ if (Test-Path $envFile) {
 if (-not $FrontendOnly) {
     Write-Host "[3/4] Starting Backend (FastAPI on :8000)..." -ForegroundColor Yellow
     
-    $backendCmd = "cd '$ScriptDir\dysruption_cva'; Write-Host 'CVA Backend Starting...' -ForegroundColor Cyan; uvicorn modules.api:app --reload --port 8000 --host 0.0.0.0"
+    $backendCmd = "cd '$ScriptDir\dysruption_cva'; Write-Host 'CVA Backend Starting...' -ForegroundColor Cyan; uvicorn modules.api:app --reload --port 8001 --host 0.0.0.0 --timeout-keep-alive 300"
     Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd
     
     # Wait for backend to be ready
@@ -75,18 +77,20 @@ if (-not $FrontendOnly) {
         Start-Sleep -Milliseconds 500
         $attempt++
         try {
-            $response = Invoke-WebRequest -Uri "http://localhost:8000/docs" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
+            $response = Invoke-WebRequest -Uri "http://localhost:8001/docs" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
             if ($response.StatusCode -eq 200) {
                 Write-Host "  Backend ready!" -ForegroundColor Green
                 break
             }
-        } catch { }
+        }
+        catch { }
     } while ($attempt -lt $maxAttempts)
     
     if ($attempt -ge $maxAttempts) {
         Write-Host "  Backend may still be starting..." -ForegroundColor Yellow
     }
-} else {
+}
+else {
     Write-Host "[3/4] Backend SKIPPED (FrontendOnly mode)" -ForegroundColor DarkGray
 }
 
@@ -117,7 +121,8 @@ if (-not $BackendOnly) {
     Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd
     
     Write-Host "  Frontend launching..." -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "[4/4] Frontend SKIPPED (BackendOnly mode)" -ForegroundColor DarkGray
 }
 
@@ -133,8 +138,8 @@ if (-not $BackendOnly) {
     Write-Host "  Dashboard:  http://localhost:3000" -ForegroundColor Magenta
 }
 if (-not $FrontendOnly) {
-    Write-Host "  API Docs:   http://localhost:8000/docs" -ForegroundColor Green
-    Write-Host "  WebSocket:  ws://localhost:8000/ws" -ForegroundColor Green
+    Write-Host "  API Docs:   http://localhost:8001/docs" -ForegroundColor Green
+    Write-Host "  WebSocket:  ws://localhost:8001/ws" -ForegroundColor Green
 }
 Write-Host ""
 Write-Host "  Options:" -ForegroundColor DarkGray

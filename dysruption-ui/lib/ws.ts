@@ -1,97 +1,157 @@
-import { WatcherUpdatePayload, VerdictUpdatePayload, VerdictPayload } from './types';
+import { WSMessage } from './types';
 
-type WSEventType = 'watcher:update' | 'verdict:update' | 'verdict:complete';
+export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 
-interface WSEvent {
-  type: WSEventType;
-  payload: WatcherUpdatePayload | VerdictUpdatePayload | VerdictPayload;
-}
+type MessageHandler = (event: WSMessage) => void;
+type StatusHandler = (status: ConnectionStatus, detail?: string) => void;
 
-type Handler = (event: WSEvent) => void;
+const isDev = process.env.NODE_ENV === 'development';
 
+/**
+ * WebSocket client for CVA real-time updates.
+ * Connects to ws://localhost:8001/ws/{run_id}
+ */
 export class CVAWebSocket {
-  private url = 'ws://localhost:8000/ws';
+  // CRITICAL: Default to 8001 - must match backend port!
+  private baseUrl: string;
+  
+  private static getDefaultWsUrl(): string {
+    // Try environment variable first
+    if (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_WS_URL) {
+      const envUrl = process.env.NEXT_PUBLIC_WS_URL;
+      return envUrl.endsWith('/ws') ? envUrl : `${envUrl}/ws`;
+    }
+    // Derive from API URL if available
+    if (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_API_URL) {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const wsUrl = apiUrl.replace(/^http/, 'ws');
+      return `${wsUrl}/ws`;
+    }
+    // Default fallback - MUST be 8001!
+    return 'ws://localhost:8001/ws';
+  }
   private ws: WebSocket | null = null;
+  private runId: string | null = null;
   private reconnectAttempts = 0;
-  private handlers: Handler[] = [];
-  private statusHandlers: ((status: string) => void)[] = [];
+  private maxReconnectAttempts = 10;
+  private messageHandlers: MessageHandler[] = [];
+  private statusHandlers: StatusHandler[] = [];
   private shouldReconnect = true;
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
 
-  constructor(url?: string) {
-    if (url) this.url = url;
+  constructor(baseUrl?: string) {
+    this.baseUrl = baseUrl || CVAWebSocket.getDefaultWsUrl();
   }
 
-  start() {
+  /**
+   * Start WebSocket connection for a specific run.
+   */
+  start(runId: string) {
+    this.runId = runId;
     this.shouldReconnect = true;
+    this.reconnectAttempts = 0;
     this.connect();
   }
 
-  onMessage(fn: Handler) { 
-    this.handlers.push(fn); 
+  onMessage(fn: MessageHandler) {
+    this.messageHandlers.push(fn);
   }
 
-  onStatusChange(fn: (status: string) => void) {
+  onStatusChange(fn: StatusHandler) {
     this.statusHandlers.push(fn);
   }
 
-  private notifyStatus(status: string) {
-    this.statusHandlers.forEach(h => h(status));
+  private notifyStatus(status: ConnectionStatus, detail?: string) {
+    this.statusHandlers.forEach((h) => h(status, detail));
   }
 
   private connect() {
+    if (!this.runId) return;
+
+    const url = `${this.baseUrl}/${this.runId}`;
+    this.notifyStatus('connecting');
+
     try {
-      this.ws = new WebSocket(this.url);
-      
-      this.ws.onopen = () => { 
-        this.reconnectAttempts = 0; 
-        console.log('ws open'); 
+      this.ws = new WebSocket(url);
+
+      this.ws.onopen = () => {
+        this.reconnectAttempts = 0;
         this.notifyStatus('connected');
+        this.startPing();
       };
-      
-      this.ws.onmessage = (e) => { 
+
+      this.ws.onmessage = (e) => {
         try {
-          const msg = JSON.parse(e.data); 
-          this.handlers.forEach(h => h(msg)); 
+          const msg: WSMessage = JSON.parse(e.data);
+          // Handle pong silently
+          if (msg.type === 'pong' || msg.type === 'ping') return;
+          this.messageHandlers.forEach((h) => h(msg));
         } catch (err) {
-          console.error('Failed to parse WS message', err);
+          // Silent fail for parse errors
         }
       };
-      
-      this.ws.onclose = () => {
+
+      this.ws.onclose = (event) => {
+        this.stopPing();
         this.notifyStatus('disconnected');
-        if (this.shouldReconnect) {
+        if (this.shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.scheduleReconnect();
         }
       };
-      
-      this.ws.onerror = () => { 
-        console.error('WS error');
-        this.ws?.close(); 
+
+      this.ws.onerror = () => {
+        this.ws?.close();
       };
     } catch (e) {
-      console.error('WS connection failed', e);
       this.scheduleReconnect();
     }
   }
 
   private scheduleReconnect() {
     this.reconnectAttempts++;
-    // Exponential backoff: min(30s, 1s * 2^attempts + jitter)
     const delay = Math.min(30000, Math.pow(2, this.reconnectAttempts) * 1000 + Math.random() * 500);
-    this.notifyStatus(`reconnecting (attempt ${this.reconnectAttempts})`);
-    console.log(`Reconnecting in ${delay}ms...`);
+    this.notifyStatus('reconnecting', `attempt ${this.reconnectAttempts}`);
     setTimeout(() => this.connect(), delay);
+  }
+
+  private startPing() {
+    this.pingInterval = setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 25000);
+  }
+
+  private stopPing() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
   }
 
   manualReconnect() {
     this.reconnectAttempts = 0;
     this.ws?.close();
-    this.connect();
+    if (this.runId) this.connect();
   }
 
-  stop() { 
+  stop() {
     this.shouldReconnect = false;
-    this.ws?.close(); 
-    this.ws = null; 
+    this.stopPing();
+    this.ws?.close();
+    this.ws = null;
+    this.runId = null;
+  }
+
+  getConnectionState(): ConnectionStatus {
+    if (!this.ws) return 'disconnected';
+    switch (this.ws.readyState) {
+      case WebSocket.CONNECTING:
+        return 'connecting';
+      case WebSocket.OPEN:
+        return 'connected';
+      default:
+        return 'disconnected';
+    }
   }
 }

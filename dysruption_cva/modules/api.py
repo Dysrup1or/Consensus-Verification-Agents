@@ -3,22 +3,34 @@ Dysruption CVA - FastAPI Backend (Module D: API Layer)
 
 RESTful API and WebSocket endpoints for the Consensus Verifier Agent.
 
-Version: 1.1
+Version: 1.2
 Features:
-- REST endpoints: /run, /status, /verdict
+- REST endpoints: /run, /status, /verdict, /prompt
 - WebSocket: /ws for real-time status streaming
 - Background task processing with run IDs
-- Integration with watcher, parser, and tribunal modules
+- Integration with watcher, parser, tribunal, and prompt synthesizer modules
 """
 
 from __future__ import annotations
 
+# Load environment variables from .env file FIRST
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Find the .env file (in the project root, same level as modules/)
+env_path = Path(__file__).parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+    print(f"[+] Loaded .env from {env_path}")
+else:
+    print(f"[!] No .env file found at {env_path}")
+
 import asyncio
 import json
-import os
 import uuid
+import aiofiles
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import yaml
@@ -28,6 +40,9 @@ from fastapi import (
     HTTPException,
     WebSocket,
     WebSocketDisconnect,
+    File,
+    UploadFile,
+    Form,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
@@ -49,6 +64,7 @@ from .schemas import (
 from .parser import ConstitutionParser, run_extraction
 from .tribunal import Tribunal, TribunalVerdict, Verdict
 from .watcher_v2 import DirectoryWatcher, run_watcher
+from .prompt_synthesizer import PromptSynthesizer, PromptRecommendation, synthesize_fix_prompt
 
 # =============================================================================
 # APP INITIALIZATION
@@ -57,7 +73,7 @@ from .watcher_v2 import DirectoryWatcher, run_watcher
 app = FastAPI(
     title="Dysruption CVA API",
     description="Consensus Verifier Agent - Multi-Model AI Tribunal for Code Verification",
-    version="1.1.0",
+    version="1.2.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -76,6 +92,47 @@ app.add_middleware(
 # IN-MEMORY STATE (Replace with Redis/DB for production)
 # =============================================================================
 
+HISTORY_FILE = Path("run_history.json")
+
+def load_run_history() -> Dict[str, RunState]:
+    """Load run history from disk."""
+    if not HISTORY_FILE.exists():
+        return {}
+    try:
+        data = json.loads(HISTORY_FILE.read_text())
+        # Note: This is a simplified reconstruction. 
+        # In a real app, we'd need full serialization/deserialization logic.
+        # For now, we just return empty to avoid complex object reconstruction issues
+        # but we keep the file for persistence.
+        return {} 
+    except Exception as e:
+        logger.error(f"Failed to load history: {e}")
+        return {}
+
+def save_run_history(run_state: RunState):
+    """Append run state to history file."""
+    try:
+        history = {}
+        if HISTORY_FILE.exists():
+            try:
+                history = json.loads(HISTORY_FILE.read_text())
+            except:
+                pass
+        
+        # Serialize run state
+        run_data = {
+            "run_id": run_state.run_id,
+            "status": run_state.state.status.value,
+            "verdict": run_state.verdict.overall_verdict.value if run_state.verdict else None,
+            "timestamp": datetime.now().isoformat(),
+            "target_dir": run_state.config.target_dir
+        }
+        
+        history[run_state.run_id] = run_data
+        HISTORY_FILE.write_text(json.dumps(history, indent=2))
+    except Exception as e:
+        logger.error(f"Failed to save history: {e}")
+
 
 class RunState:
     """State for a single verification run."""
@@ -93,6 +150,10 @@ class RunState:
         self.verdict: Optional[TribunalVerdict] = None
         self.patches: Optional[PatchSet] = None
         self.error: Optional[str] = None
+        # New fields for prompt synthesis
+        self.spec_summary: Optional[str] = None
+        self.file_tree: Optional[Dict[str, str]] = None
+        self.prompt_recommendation: Optional[Dict[str, Any]] = None
 
 
 # Global state stores
@@ -216,6 +277,9 @@ async def run_verification_pipeline(run_id: str) -> None:
         file_tree_dict = {
             path: node.content for path, node in file_tree.files.items()
         }
+        
+        # Store file tree for prompt synthesis later
+        run_state.file_tree = file_tree_dict
 
         await update_progress(
             PipelineStatus.SCANNING,
@@ -230,7 +294,18 @@ async def run_verification_pipeline(run_id: str) -> None:
         )
 
         parser = ConstitutionParser(config.config_path)
-        spec_content = parser.read_spec(config.spec_path)
+        
+        # Use spec_content if provided directly, otherwise read from file
+        if config.spec_content:
+            spec_content = config.spec_content
+            logger.info("Using provided spec content (constitution text)")
+        else:
+            spec_content = parser.read_spec(config.spec_path)
+            logger.info(f"Read spec from file: {config.spec_path}")
+        
+        # Store spec summary for prompt synthesis later
+        run_state.spec_summary = spec_content
+        
         invariants = parser.extract_invariants(spec_content)
         invariants = parser.clarify_if_needed(invariants, spec_content)
         parser.save_criteria(invariants)
@@ -250,11 +325,20 @@ async def run_verification_pipeline(run_id: str) -> None:
             50.0,
             "Running static analysis (pylint, bandit)...",
         )
+        
+        # Yield to event loop before long-running sync operation
+        await asyncio.sleep(0)
 
         tribunal = Tribunal(config.config_path)
-        static_results, should_abort, abort_reason = tribunal.run_static_analysis(
-            file_tree_dict, watcher.detect_primary_language()
-        )
+        
+        # Run static analysis in executor to not block event loop
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            static_results, should_abort, abort_reason = await loop.run_in_executor(
+                executor,
+                lambda: tribunal.run_static_analysis(file_tree_dict, watcher.detect_primary_language())
+            )
 
         if should_abort:
             await update_progress(
@@ -266,10 +350,17 @@ async def run_verification_pipeline(run_id: str) -> None:
             run_state.error = abort_reason
 
             # Still create a verdict for the aborted run
+            # FIX: Pass precomputed results to avoid re-running static analysis (Double Jeopardy)
             run_state.verdict = tribunal.run(
-                file_tree_dict, invariants, watcher.detect_primary_language()
+                file_tree_dict, 
+                invariants, 
+                watcher.detect_primary_language(),
+                precomputed_static_results=(static_results, should_abort, abort_reason)
             )
             tribunal.save_outputs(run_state.verdict)
+            
+            # Save run state to disk immediately
+            save_run_history(run_state)
 
             ws_message = WebSocketMessage(
                 type="error",
@@ -295,8 +386,12 @@ async def run_verification_pipeline(run_id: str) -> None:
         )
 
         # Run full tribunal (includes static analysis again, but main work is judging)
+        # FIX: Pass precomputed results here too for efficiency
         verdict = tribunal.run(
-            file_tree_dict, invariants, watcher.detect_primary_language()
+            file_tree_dict, 
+            invariants, 
+            watcher.detect_primary_language(),
+            precomputed_static_results=(static_results, should_abort, abort_reason)
         )
         run_state.verdict = verdict
 
@@ -334,6 +429,10 @@ async def run_verification_pipeline(run_id: str) -> None:
 
         # Complete
         run_state.state.completed_at = datetime.now()
+        
+        # Save run state to disk
+        save_run_history(run_state)
+        
         await update_progress(
             PipelineStatus.COMPLETE,
             "complete",
@@ -379,18 +478,126 @@ async def run_verification_pipeline(run_id: str) -> None:
 
 @app.get("/")
 async def root() -> Dict[str, Any]:
-    """Health check and API info."""
-    return {
+    """
+    Deep Health Check & API Info.
+    Verifies file system permissions and API key presence.
+    """
+    health_status = {
         "name": "Dysruption CVA API",
         "version": "1.1.0",
         "status": "healthy",
+        "checks": {
+            "filesystem": "unknown",
+            "api_keys": "unknown",
+        },
         "endpoints": {
             "run": "POST /run - Start verification run",
+            "upload": "POST /upload - Upload files for analysis",
             "status": "GET /status/{run_id} - Get run status",
             "verdict": "GET /verdict/{run_id} - Get final verdict",
             "ws": "WS /ws/{run_id} - Real-time status streaming",
         },
     }
+
+    # 1. File System Check
+    try:
+        test_file = Path(os.getcwd()) / "temp_uploads" / ".healthcheck"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_text("ok")
+        test_file.unlink()
+        health_status["checks"]["filesystem"] = "ok"
+    except Exception as e:
+        health_status["checks"]["filesystem"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+
+    # 2. API Key Check
+    # Check for common LLM keys. At least one should be present.
+    keys_present = []
+    for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AZURE_API_KEY", "LITELLM_API_KEY"]:
+        if os.environ.get(key):
+            keys_present.append(key)
+    
+    if keys_present:
+        health_status["checks"]["api_keys"] = "ok"
+    else:
+        health_status["checks"]["api_keys"] = "missing (OPENAI_API_KEY, etc.)"
+        # We don't mark as degraded yet as user might rely on local models, 
+        # but it's good info.
+
+    return health_status
+
+
+@app.post("/upload")
+async def upload_files(
+    files: List[UploadFile] = File(...),
+    paths: List[str] = Form(...),
+    upload_id: Optional[str] = Form(None)
+) -> Dict[str, Any]:
+    """
+    Upload files for analysis. Supports batching via upload_id.
+    
+    - If upload_id is None: Creates new session.
+    - If upload_id is provided: Appends to existing session.
+    """
+    # Validate or create upload_id
+    if upload_id:
+        # Security check: Alphanumeric only to prevent traversal
+        if not upload_id.isalnum():
+             raise HTTPException(status_code=400, detail="Invalid upload_id")
+        # Use existing directory
+        temp_dir = Path(os.getcwd()) / "temp_uploads" / upload_id
+        if not temp_dir.exists():
+             # If it doesn't exist (expired?), create it
+             temp_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        # Create new session
+        upload_id = str(uuid.uuid4())[:8]
+        temp_dir = Path(os.getcwd()) / "temp_uploads" / upload_id
+        temp_dir.mkdir(parents=True, exist_ok=True)
+    
+    logger.info(f"Upload {upload_id}: Processing batch of {len(files)} files")
+    
+    saved_count = 0
+    
+    try:
+        # Iterate through files and paths (they should match by index)
+        for i, file in enumerate(files):
+            # Get relative path from form data, or fallback to filename
+            rel_path = paths[i] if i < len(paths) else file.filename
+            
+            # Sanitize path to prevent directory traversal
+            clean_rel_path = rel_path.lstrip("/").lstrip("\\").replace("..", "")
+            
+            # Construct full path
+            file_path = temp_dir / clean_rel_path
+            
+            # Ensure parent directories exist
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Save file using streaming
+            async with aiofiles.open(file_path, "wb") as f:
+                while True:
+                    chunk = await file.read(1024 * 1024)  # 1MB chunks
+                    if not chunk:
+                        break
+                    await f.write(chunk)
+            
+            saved_count += 1
+            
+        logger.info(f"Upload {upload_id}: Batch complete, saved {saved_count} files")
+        
+        return {
+            "upload_id": upload_id,
+            "path": str(temp_dir.absolute()),
+            "count": saved_count,
+            "message": f"Successfully uploaded batch of {saved_count} files"
+        }
+        
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        # Note: We do NOT delete the dir on error anymore, to allow retrying batches
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
 
 
 @app.post("/run", response_model=RunResponse)
@@ -403,19 +610,110 @@ async def start_run(
     Initiates the CVA pipeline in the background and returns a run_id
     for tracking progress via /status or /ws endpoints.
     """
-    # Validate target directory exists
-    if not os.path.exists(request.target_dir):
+    target_dir = request.target_dir.strip()
+    
+    # =========================================================================
+    # PATH VALIDATION (Bulletproof security checks)
+    # =========================================================================
+    
+    # Check for empty path
+    if not target_dir:
         raise HTTPException(
-            status_code=400, detail=f"Target directory not found: {request.target_dir}"
+            status_code=400, 
+            detail="Target directory cannot be empty. Please provide an absolute path."
+        )
+    
+    # Check for file picker placeholder (frontend bug prevention)
+    if target_dir.startswith('[') and target_dir.endswith(']'):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid path format. Browser file picker cannot provide actual paths. "
+                   "Please manually enter the absolute path to your project (e.g., C:\\Users\\...\\my-project)"
+        )
+    
+    # Check for relative paths (dangerous - resolves to backend CWD)
+    if target_dir in ('.', '..') or target_dir.startswith('./') or target_dir.startswith('../'):
+        raise HTTPException(
+            status_code=400,
+            detail="Relative paths are not allowed. Please provide an absolute path "
+                   "(e.g., C:\\Users\\...\\my-project or /home/user/projects/my-project)"
+        )
+    
+    # Check for absolute path (Windows or Unix)
+    is_absolute_windows = len(target_dir) >= 3 and target_dir[1] == ':' and target_dir[2] in ('\\', '/')
+    is_absolute_unix = target_dir.startswith('/')
+    
+    if not is_absolute_windows and not is_absolute_unix:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Path must be absolute. Received: '{target_dir}'. "
+                   "Please use a full path starting with a drive letter (C:\\...) or forward slash (/...)"
+        )
+    
+    # Prevent self-scanning (CVA analyzing its own codebase)
+    # BUT: Allow temp_uploads paths - these contain USER-uploaded code, not CVA source
+    target_lower = target_dir.lower().replace('/', '\\')
+    
+    is_temp_upload = 'temp_uploads' in target_lower
+    
+    if not is_temp_upload:
+        # Only check path-based patterns if NOT a temp_upload
+        dangerous_patterns = [
+            'consensus verifier agent',
+            'dysruption_cva',
+            'dysruption-ui',
+            'cva\\modules',
+            'cva/modules',
+        ]
+        
+        for pattern in dangerous_patterns:
+            if pattern in target_lower:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot scan the CVA application itself (detected: '{pattern}'). "
+                           "Please select your target project directory, not the CVA installation."
+                )
+    
+    # ROBUST CHECK: Look for actual CVA source files regardless of path
+    cva_signature_files = [
+        os.path.join(target_dir, 'modules', 'tribunal.py'),
+        os.path.join(target_dir, 'modules', 'api.py'),
+        os.path.join(target_dir, 'cva.py'),
+    ]
+    
+    cva_files_found = [f for f in cva_signature_files if os.path.exists(f)]
+    if len(cva_files_found) >= 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot scan the CVA application itself. "
+                   "Detected CVA source files in target directory. "
+                   "Please select your target project directory, not the CVA installation."
+        )
+    
+    # Validate target directory exists
+    if not os.path.exists(target_dir):
+        raise HTTPException(
+            status_code=400, detail=f"Target directory not found: {target_dir}"
+        )
+    
+    # Validate it's actually a directory
+    if not os.path.isdir(target_dir):
+        raise HTTPException(
+            status_code=400, detail=f"Path is not a directory: {target_dir}"
         )
 
+    # =========================================================================
+    # START THE RUN
+    # =========================================================================
+    
     # Generate run ID
     run_id = str(uuid.uuid4())[:8]
 
     # Create run config
     config = RunConfig(
-        target_dir=request.target_dir,
+        target_dir=target_dir,
         spec_path=request.spec_path or "spec.txt",
+        spec_content=request.spec_content,  # Pass constitution text if provided
         config_path="config.yaml",
         generate_patches=request.generate_patches,
         watch_mode=request.watch_mode,
@@ -427,12 +725,12 @@ async def start_run(
     # Start background task
     background_tasks.add_task(run_verification_pipeline, run_id)
 
-    logger.info(f"Started verification run: {run_id} for {request.target_dir}")
+    logger.info(f"Started verification run: {run_id} for {target_dir}")
 
     return RunResponse(
         run_id=run_id,
         status=PipelineStatus.SCANNING,
-        message=f"Verification started for {request.target_dir}",
+        message=f"Verification started for {target_dir}",
     )
 
 
@@ -453,8 +751,8 @@ async def get_verdict(run_id: str) -> VerdictResponse:
     """
     Get the final verdict of a verification run.
 
-    Only available after the run is complete. Returns the consensus result
-    and any generated patches.
+    Only available after the run is complete. Returns the consensus result,
+    any generated patches, AND the raw report/diff content for frontend download.
     """
     run_state = get_run(run_id)
 
@@ -464,10 +762,15 @@ async def get_verdict(run_id: str) -> VerdictResponse:
             consensus=None,
             patches=None,
             ready=False,
+            report_markdown=None,
+            patch_diff=None,
         )
 
     # Convert TribunalVerdict to ConsensusResult
     consensus = None
+    report_markdown = None
+    patch_diff = None
+    
     if run_state.verdict:
         v = run_state.verdict
         consensus = ConsensusResult(
@@ -491,13 +794,158 @@ async def get_verdict(run_id: str) -> VerdictResponse:
                 )
             ),
         )
+        
+        # Load REPORT.md content if it exists
+        try:
+            report_path = Path("REPORT.md")
+            if report_path.exists():
+                report_markdown = report_path.read_text(encoding="utf-8")
+                logger.info(f"Loaded REPORT.md: {len(report_markdown)} chars")
+        except Exception as e:
+            logger.warning(f"Could not load REPORT.md: {e}")
+    
+    # Combine all patch diffs into a single string
+    if run_state.patches and run_state.patches.patches:
+        patch_diff = "\n\n".join(
+            f"# {p.file_path}\n{p.unified_diff}" 
+            for p in run_state.patches.patches
+        )
+        logger.info(f"Combined {len(run_state.patches.patches)} patches into diff")
 
     return VerdictResponse(
         run_id=run_id,
         consensus=consensus,
         patches=run_state.patches,
         ready=True,
+        report_markdown=report_markdown,
+        patch_diff=patch_diff,
     )
+
+
+@app.get("/prompt/{run_id}")
+async def get_fix_prompt(run_id: str) -> Dict[str, Any]:
+    """
+    Generate a synthesized fix prompt for a failed verification run.
+    
+    Returns a comprehensive, actionable prompt that can be given to an AI
+    coding assistant (Claude, GPT-4, Copilot) to fix the identified issues.
+    
+    Only available after verification is complete and has issues to fix.
+    """
+    run_state = get_run(run_id)
+
+    if run_state.state.status not in (PipelineStatus.COMPLETE, PipelineStatus.ERROR):
+        return {
+            "run_id": run_id,
+            "ready": False,
+            "message": "Verification not yet complete",
+            "prompt": None,
+        }
+
+    if not run_state.verdict:
+        return {
+            "run_id": run_id,
+            "ready": False,
+            "message": "No verdict available",
+            "prompt": None,
+        }
+
+    # Check if already generated
+    if run_state.prompt_recommendation:
+        return {
+            "run_id": run_id,
+            "ready": True,
+            "message": "Fix prompt generated",
+            "prompt": run_state.prompt_recommendation,
+        }
+
+    # Check if actually needs fixing
+    v = run_state.verdict
+    if v.overall_verdict == Verdict.PASS:
+        return {
+            "run_id": run_id,
+            "ready": True,
+            "message": "No issues to fix - verification passed!",
+            "prompt": {
+                "primary_prompt": "✅ Congratulations! Your code passed all verification checks.",
+                "priority_issues": [],
+                "strategy": "No fixes needed",
+                "complexity": "none",
+                "alternative_prompts": [],
+                "context_files": [],
+            },
+        }
+
+    # Generate fix prompt using synthesizer
+    try:
+        # Convert TribunalVerdict to dict for synthesizer
+        verdict_data = {
+            "overall_verdict": v.overall_verdict.value,
+            "overall_score": v.overall_score,
+            "veto_triggered": v.veto_triggered,
+            "veto_reason": v.veto_reason,
+            "criterion_results": [
+                {
+                    "criterion_type": cr.criterion_type,
+                    "criterion_desc": cr.criterion_desc,
+                    "average_score": cr.average_score,
+                    "veto_triggered": cr.veto_triggered,
+                    "relevant_files": cr.relevant_files,
+                    "scores": [
+                        {
+                            "judge_name": s.judge_name,
+                            "score": s.score,
+                            "issues": s.issues,
+                            "suggestions": s.suggestions,
+                        }
+                        for s in cr.scores
+                    ],
+                }
+                for cr in v.criterion_results
+            ],
+            "static_analysis_results": [
+                {
+                    "tool": sar.tool,
+                    "file_path": sar.file_path,
+                    "issues": sar.issues,
+                    "has_critical": sar.has_critical,
+                }
+                for sar in v.static_analysis_results
+            ],
+        }
+
+        # Get spec summary
+        spec_summary = run_state.spec_summary or "No specification available"
+
+        # Get file tree
+        file_tree = run_state.file_tree
+
+        # Synthesize the prompt
+        recommendation = synthesize_fix_prompt(
+            verdict_data=verdict_data,
+            spec_summary=spec_summary,
+            file_tree=file_tree,
+            config_path=run_state.config.config_path,
+        )
+
+        # Cache the result
+        run_state.prompt_recommendation = recommendation.to_dict()
+
+        return {
+            "run_id": run_id,
+            "ready": True,
+            "message": "Fix prompt generated successfully",
+            "prompt": run_state.prompt_recommendation,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to generate fix prompt for run {run_id}: {e}")
+        return {
+            "run_id": run_id,
+            "ready": False,
+            "message": f"Failed to generate fix prompt: {str(e)}",
+            "prompt": None,
+        }
 
 
 @app.delete("/run/{run_id}")

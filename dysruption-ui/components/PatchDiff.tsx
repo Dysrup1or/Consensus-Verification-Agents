@@ -1,54 +1,74 @@
 import { Patch } from '@/lib/types';
-import { Copy, Download } from 'lucide-react';
-import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued';
+import { Copy, Download, CheckCircle } from 'lucide-react';
+import { useState } from 'react';
 
 interface PatchDiffProps {
   patch: Patch;
 }
 
 export default function PatchDiff({ patch }: PatchDiffProps) {
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(patch.diffUnified);
-    alert('Patch copied to clipboard!');
+  const [copied, setCopied] = useState(false);
+
+  const copyToClipboard = async () => {
+    await navigator.clipboard.writeText(patch.unified_diff);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
-  // Simple parser to split unified diff into old/new for the viewer
-  // Note: react-diff-viewer expects old/new text, but we have a unified diff.
-  // For simplicity in this demo without a heavy parser, we'll just render the unified diff text 
-  // or use a unified diff view if the library supports it directly or we parse it.
-  // react-diff-viewer-continued is good for side-by-side.
-  // If we only have the unified diff string, we might just render it nicely with syntax highlighting 
-  // or use a simpler approach if we don't want to parse it back to original/new files.
-  // Let's try to render it as a raw unified diff with coloring for now if we can't easily reconstruct.
-  // Actually, let's just render the raw diff with custom styling as requested in "Performance & scale considerations"
-  // "parse unified diff into hunks and render two columns... OR render unified diff text"
-  
-  const lines = patch.diffUnified.split('\n');
+  const downloadPatch = () => {
+    const blob = new Blob([patch.unified_diff], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${patch.file_path.replace(/\//g, '_')}.patch`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const lines = patch.unified_diff.split('\n');
 
   return (
-    <div className="border border-white/20 rounded-lg overflow-hidden bg-[#1e1e1e]" aria-label={`Patch diff for ${patch.file}`}>
-      <div className="flex items-center justify-between px-4 py-2 bg-white/5 border-b border-white/10">
-        <span className="font-mono text-sm text-neonCyan">{patch.file}</span>
+    <div className="border border-border rounded-lg overflow-hidden bg-surface" aria-label={`Patch diff for ${patch.file_path}`}>
+      <div className="flex items-center justify-between px-4 py-2 bg-panel border-b border-border">
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-sm text-primary">{patch.file_path}</span>
+          {patch.requires_review && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-warning/20 text-warning uppercase tracking-wider">
+              Needs Review
+            </span>
+          )}
+        </div>
         <div className="flex gap-2">
           <button 
             onClick={copyToClipboard}
-            className="p-2 hover:bg-white/10 rounded transition-colors"
+            className="p-2 hover:bg-border rounded transition-colors flex items-center gap-1"
             title="Copy Patch"
           >
-            <Copy size={16} />
+            {copied ? <CheckCircle size={16} className="text-success" /> : <Copy size={16} className="text-textMuted" />}
+            {copied && <span className="text-xs text-success">Copied!</span>}
           </button>
-          <button className="p-2 hover:bg-white/10 rounded transition-colors" title="Download">
-            <Download size={16} />
+          <button 
+            onClick={downloadPatch}
+            className="p-2 hover:bg-border rounded transition-colors" 
+            title="Download"
+          >
+            <Download size={16} className="text-textMuted" />
           </button>
         </div>
       </div>
       
-      <div className="p-4 overflow-x-auto font-mono text-sm">
+      <div className="p-4 overflow-x-auto font-mono text-sm max-h-96 overflow-y-auto">
         {lines.map((line, i) => {
           let className = "text-gray-400";
-          if (line.startsWith('+')) className = "text-green-400 bg-green-900/20 block w-full";
-          if (line.startsWith('-')) className = "text-red-400 bg-red-900/20 block w-full";
-          if (line.startsWith('@@')) className = "text-purple-400 block w-full my-2";
+          if (line.startsWith('+') && !line.startsWith('+++')) {
+            className = "text-green-400 bg-green-900/20 block w-full";
+          } else if (line.startsWith('-') && !line.startsWith('---')) {
+            className = "text-red-400 bg-red-900/20 block w-full";
+          } else if (line.startsWith('@@')) {
+            className = "text-purple-400 block w-full my-2";
+          } else if (line.startsWith('+++') || line.startsWith('---')) {
+            className = "text-blue-400 block w-full";
+          }
           
           return (
             <div key={i} className={className}>
@@ -59,8 +79,9 @@ export default function PatchDiff({ patch }: PatchDiffProps) {
         })}
       </div>
       
-      <div className="px-4 py-2 bg-white/5 border-t border-white/10 text-xs text-gray-500">
-        Generated by {patch.generatedBy}
+      <div className="px-4 py-2 bg-panel border-t border-border text-xs text-textMuted flex justify-between">
+        <span>Generated by {patch.generated_by}</span>
+        <span>Confidence: {(patch.confidence * 100).toFixed(0)}%</span>
       </div>
     </div>
   );
