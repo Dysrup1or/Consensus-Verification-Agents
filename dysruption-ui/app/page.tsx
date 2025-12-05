@@ -166,14 +166,17 @@ export default function Dashboard() {
 
   // Handle file selection
   const handleFilesSelected = (files: FileList | null, path?: string) => {
-    console.log('🔴 handleFilesSelected called:', { files: files?.length, path });
+    console.log('🎯🎯🎯 [page.tsx] handleFilesSelected CALLED:', { files: files?.length, path });
     if (path) {
-      console.log('📁 Setting targetPath to:', path);
+      console.log('📁 [page.tsx] Setting targetPath to:', path);
       setTargetPath(path);
+      console.log('✅ [page.tsx] setTargetPath called with:', path);
     } else if (files && files.length > 0) {
       const pathStr = `[${files.length} files selected]`;
-      console.log('📄 Setting targetPath to:', pathStr);
+      console.log('📄 [page.tsx] Setting targetPath to:', pathStr);
       setTargetPath(pathStr);
+    } else {
+      console.warn('⚠️ [page.tsx] handleFilesSelected called but no path and no files!');
     }
   };
 

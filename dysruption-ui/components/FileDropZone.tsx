@@ -140,10 +140,12 @@ export default function FileDropZone({ onFilesSelected, acceptedTypes, disabled 
       });
 
       console.log('✅ Upload complete:', result);
+      console.log('🎯 [FileDropZone] Calling onFilesSelected with path:', result.path);
       setUploadStatus("Upload complete!");
 
-      // Pass the temp path to the parent
+      // Pass the temp path to the parent - CRITICAL: This sets targetPath!
       onFilesSelected(null, result.path);
+      console.log('🎯 [FileDropZone] onFilesSelected called successfully');
       
       // NEW: Update UI to show successful upload
       setUploadedPath(result.path);
