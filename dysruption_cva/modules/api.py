@@ -27,11 +27,15 @@ else:
     print(f"[!] No .env file found at {env_path}")
 
 import asyncio
+from collections import defaultdict
+import hmac
 import json
 import uuid
 import aiofiles
+import re
+import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import yaml
 from fastapi import (
@@ -43,13 +47,17 @@ from fastapi import (
     File,
     UploadFile,
     Form,
+    Request,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from .schemas import (
     ConsensusResult,
+    ConstitutionHistoryItem,
+    ConstitutionInfo,
     InvariantSet,
+    IntentEnvelope,
     PatchSet,
     PipelineState,
     PipelineStatus,
@@ -57,6 +65,9 @@ from .schemas import (
     RunRequest,
     RunResponse,
     StatusResponse,
+    SuccessSpec,
+    TriggerScanRequest,
+    TriggerScanResponse,
     VerdictResponse,
     VerdictStatus,
     WebSocketMessage,
@@ -65,26 +76,301 @@ from .parser import ConstitutionParser, run_extraction
 from .tribunal import Tribunal, TribunalVerdict, Verdict
 from .watcher_v2 import DirectoryWatcher, run_watcher
 from .prompt_synthesizer import PromptSynthesizer, PromptRecommendation, synthesize_fix_prompt
+from .file_manager import (
+    build_llm_context,
+    detect_changed_files,
+    get_project_root,
+    is_git_repo,
+    resolve_imports,
+)
+from .judge_engine import default_min_constitution, judge_engine
 
 # =============================================================================
 # APP INITIALIZATION
 # =============================================================================
 
+# Security configuration from environment
+PRODUCTION_MODE = os.getenv("CVA_PRODUCTION", "false").lower() == "true"
+ALLOWED_ORIGINS = os.getenv("CVA_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+MAX_UPLOAD_SIZE_MB = int(os.getenv("CVA_MAX_UPLOAD_MB", "100"))
+RATE_LIMIT_PER_MINUTE = int(os.getenv("CVA_RATE_LIMIT", "30"))
+API_TOKEN = os.getenv("CVA_API_TOKEN", "")
+
+# Tribunal API configuration
+TRIBUNAL_INTENT_TTL_SECONDS = int(os.getenv("CVA_INTENT_TTL_SECONDS", "600"))
+TRIBUNAL_TOKEN_BUDGET = int(os.getenv("CVA_TRIBUNAL_TOKEN_BUDGET", "8000"))
+TRIBUNAL_MTIME_WINDOW_SECONDS = int(os.getenv("CVA_TRIBUNAL_MTIME_WINDOW_SECONDS", "300"))
+TRIBUNAL_RATE_LIMIT_PER_MINUTE = int(os.getenv("CVA_TRIBUNAL_RATE_LIMIT", "60"))
+TRIBUNAL_INTENT_LLM_MODEL = os.getenv("CVA_TRIBUNAL_INTENT_MODEL", "openai/gpt-4o-mini")
+TRIBUNAL_LLM_TIMEOUT_SECONDS = int(os.getenv("CVA_TRIBUNAL_LLM_TIMEOUT_SECONDS", "45"))
+
+# Where uploads and per-run artifacts are stored.
+# In Railway, mount the volume at /app/temp_uploads and set CVA_UPLOAD_ROOT accordingly if needed.
+UPLOAD_ROOT = Path(os.getenv("CVA_UPLOAD_ROOT", str(Path(os.getcwd()) / "temp_uploads")))
+RUN_ARTIFACTS_ROOT = Path(os.getenv("CVA_RUN_ARTIFACTS_ROOT", str(Path(os.getcwd()) / "run_artifacts")))
+
+# Rate limiting state (simple in-memory, use Redis for production)
+_rate_limit_tracker: Dict[str, List[float]] = defaultdict(list)
+
+def check_rate_limit(client_ip: str) -> bool:
+    """Check if client has exceeded rate limit. Returns True if allowed."""
+    now = time.time()
+    window = 60.0  # 1 minute window
+    
+    # Clean old entries
+    _rate_limit_tracker[client_ip] = [
+        t for t in _rate_limit_tracker[client_ip] if now - t < window
+    ]
+    
+    # Check limit
+    if len(_rate_limit_tracker[client_ip]) >= RATE_LIMIT_PER_MINUTE:
+        return False
+    
+    _rate_limit_tracker[client_ip].append(now)
+    return True
+
+
+def _get_bearer_or_header_token(request: Request) -> str:
+    """Extract auth token from Authorization: Bearer ... or X-API-Token."""
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth and auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    header_token = request.headers.get("x-api-token") or request.headers.get("X-API-Token")
+    if header_token:
+        return header_token.strip()
+    return ""
+
+
+def _require_api_token(request: Request) -> None:
+    """Require shared token for sensitive endpoints in production mode."""
+    if not PRODUCTION_MODE:
+        return
+
+    if not API_TOKEN:
+        # Fail closed if production is enabled but token isn't configured.
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfigured: CVA_API_TOKEN must be set when CVA_PRODUCTION=true",
+        )
+
+    provided = _get_bearer_or_header_token(request)
+    if not provided:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing auth token. Provide Authorization: Bearer <token> or X-API-Token header.",
+        )
+
+    if not hmac.compare_digest(provided, API_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid auth token")
+
+
+def _require_tribunal_api_token(request: Request) -> None:
+    """Require shared token for Tribunal endpoints.
+
+    Requirement: Bearer API Key is required for POST /api/intent and POST /api/trigger_scan.
+    We use CVA_API_TOKEN as the shared key.
+    """
+
+    if not API_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfigured: CVA_API_TOKEN must be set for Tribunal API",
+        )
+
+    provided = _get_bearer_or_header_token(request)
+    if not provided:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing auth token. Provide Authorization: Bearer <token> or X-API-Token header.",
+        )
+
+    if not hmac.compare_digest(provided, API_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid auth token")
+
+
+def _sanitize_str(value: str, *, max_len: int = 2000) -> str:
+    value = value or ""
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:max_len]
+
+
+def _tribunal_rate_limit_key(project_id: str, origin: str) -> str:
+    # Rate limit by project and origin (requirement). Origin may be empty.
+    return f"tribunal:{project_id}:{origin}"
+
+
+_tribunal_rate_limit_tracker: Dict[str, List[float]] = defaultdict(list)
+
+
+def check_tribunal_rate_limit(project_id: str, origin: str) -> bool:
+    now = time.time()
+    window = 60.0
+    key = _tribunal_rate_limit_key(project_id, origin)
+    _tribunal_rate_limit_tracker[key] = [t for t in _tribunal_rate_limit_tracker[key] if now - t < window]
+    if len(_tribunal_rate_limit_tracker[key]) >= TRIBUNAL_RATE_LIMIT_PER_MINUTE:
+        return False
+    _tribunal_rate_limit_tracker[key].append(now)
+    return True
+
+
+class _TTLStore:
+    def __init__(self):
+        self._data: Dict[str, Tuple[float, Any]] = {}
+        self._lock = asyncio.Lock()
+
+    async def set(self, key: str, value: Any, ttl_seconds: int) -> None:
+        async with self._lock:
+            self._data[key] = (time.time() + ttl_seconds, value)
+
+    async def get(self, key: str) -> Optional[Any]:
+        async with self._lock:
+            if key not in self._data:
+                return None
+            expires_at, value = self._data[key]
+            if time.time() > expires_at:
+                self._data.pop(key, None)
+                return None
+            return value
+
+    async def delete(self, key: str) -> None:
+        async with self._lock:
+            self._data.pop(key, None)
+
+
+_intent_store = _TTLStore()
+_tribunal_run_store = _TTLStore()  # stores status, results, and error details
+
+# Constitution cache: (project_root, commit_hash) -> constitution_text
+_constitution_cache: Dict[Tuple[str, str], str] = {}
+
+
+def _find_constitution_path(project_root: Path) -> Path:
+    # Source of truth per requirement: ./.tribunal/constitution.md (or .txt)
+    md = project_root / ".tribunal" / "constitution.md"
+    txt = project_root / ".tribunal" / "constitution.txt"
+    if md.exists():
+        return md
+    if txt.exists():
+        return txt
+    return md
+
+
+def _get_git_commit_for_path(project_root: Path, rel_path: str) -> Optional[str]:
+    try:
+        from git import Repo
+
+        repo = Repo(str(project_root))
+        commits = list(repo.iter_commits(paths=rel_path, max_count=1))
+        if commits:
+            return commits[0].hexsha
+    except Exception:
+        return None
+    return None
+
+
+def _get_git_history_for_path(project_root: Path, rel_path: str, max_items: int = 20) -> List[ConstitutionHistoryItem]:
+    try:
+        from git import Repo
+
+        repo = Repo(str(project_root))
+        out: List[ConstitutionHistoryItem] = []
+        for c in repo.iter_commits(paths=rel_path, max_count=max_items):
+            out.append(
+                ConstitutionHistoryItem(
+                    commit_hash=c.hexsha,
+                    author=str(getattr(c, "author", "") or "") or None,
+                    authored_at=str(getattr(c, "authored_datetime", "") or "") or None,
+                    subject=str(getattr(c, "summary", "") or "") or None,
+                )
+            )
+        return out
+    except Exception:
+        return []
+
+
+def _load_constitution(project_root: Path, commit_hash: Optional[str] = None) -> Tuple[str, ConstitutionInfo]:
+    constitution_path = _find_constitution_path(project_root)
+    rel = constitution_path.relative_to(project_root).as_posix() if constitution_path.exists() else ".tribunal/constitution.md"
+
+    git_commit = None
+    if is_git_repo(project_root) and constitution_path.exists():
+        git_commit = _get_git_commit_for_path(project_root, rel)
+
+    cache_key_commit = commit_hash or git_commit or ""
+    cache_key = (str(project_root.resolve()), cache_key_commit)
+
+    if cache_key_commit and cache_key in _constitution_cache:
+        text = _constitution_cache[cache_key]
+        return text, ConstitutionInfo(path=rel, commit_hash=cache_key_commit, snippet_length=min(len(text), 512))
+
+    if constitution_path.exists():
+        try:
+            text = constitution_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            text = default_min_constitution()
+    else:
+        text = default_min_constitution()
+
+    if cache_key_commit:
+        _constitution_cache[cache_key] = text
+
+    return text, ConstitutionInfo(path=rel, commit_hash=cache_key_commit or None, snippet_length=min(len(text), 512))
+
+
+def _is_path_within_root(target_dir: str, allowed_root: Path) -> bool:
+    try:
+        target = Path(target_dir).resolve()
+        root = allowed_root.resolve()
+        return target.is_relative_to(root)
+    except Exception:
+        return False
+
+
+def _create_run_artifacts(run_id: str, base_config_path: str) -> Tuple[Path, Path]:
+    """Create per-run artifacts directory and a derived config.yaml with per-run output paths."""
+    run_dir = (RUN_ARTIFACTS_ROOT / run_id).resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load base config (best-effort)
+    base_path = Path(base_config_path)
+    if not base_path.is_absolute():
+        base_path = (Path(os.getcwd()) / base_path).resolve()
+
+    cfg: Dict[str, Any] = {}
+    try:
+        if base_path.exists():
+            cfg = yaml.safe_load(base_path.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        logger.warning(f"Failed to load base config '{base_path}': {e}")
+        cfg = {}
+
+    output_cfg = cfg.get("output") or {}
+    output_cfg["report_file"] = str(run_dir / "REPORT.md")
+    output_cfg["verdict_file"] = str(run_dir / "verdict.json")
+    output_cfg["criteria_file"] = str(run_dir / "criteria.json")
+    cfg["output"] = output_cfg
+
+    derived_path = run_dir / "config.yaml"
+    derived_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+    return run_dir, derived_path
+
 app = FastAPI(
     title="Dysruption CVA API",
     description="Consensus Verifier Agent - Multi-Model AI Tribunal for Code Verification",
     version="1.2.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/docs" if not PRODUCTION_MODE else None,  # Disable docs in production
+    redoc_url="/redoc" if not PRODUCTION_MODE else None,
 )
 
-# CORS configuration
+# CORS configuration - restricted in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=ALLOWED_ORIGINS if PRODUCTION_MODE else ["*"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],  # Restrict to needed methods
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
 
 
@@ -154,6 +440,12 @@ class RunState:
         self.spec_summary: Optional[str] = None
         self.file_tree: Optional[Dict[str, str]] = None
         self.prompt_recommendation: Optional[Dict[str, Any]] = None
+
+        # Per-run artifact paths (set by pipeline)
+        self.artifacts_dir: Optional[str] = None
+        self.report_path: Optional[str] = None
+        self.verdict_path: Optional[str] = None
+        self.criteria_path: Optional[str] = None
 
 
 # Global state stores
@@ -242,6 +534,16 @@ async def run_verification_pipeline(run_id: str) -> None:
 
     config = run_state.config
 
+    # Create per-run artifacts dir + derived config with per-run output paths.
+    artifacts_dir, effective_config_path = _create_run_artifacts(run_id, config.config_path)
+    run_state.artifacts_dir = str(artifacts_dir)
+    run_state.report_path = str(artifacts_dir / "REPORT.md")
+    run_state.verdict_path = str(artifacts_dir / "verdict.json")
+    run_state.criteria_path = str(artifacts_dir / "criteria.json")
+
+    # Use derived config for all modules (parser/tribunal/watcher) so outputs are isolated per-run.
+    config.config_path = str(effective_config_path)
+
     async def update_progress(
         status: PipelineStatus,
         phase: str,
@@ -272,10 +574,23 @@ async def run_verification_pipeline(run_id: str) -> None:
         await update_progress(
             PipelineStatus.SCANNING, "scanning", 10.0, "Scanning project directory..."
         )
+        
+        # 🔍 DIAGNOSTIC: Log exactly what we're scanning
+        logger.info(f"🔴🔴🔴 [TRACE-3] Pipeline scanning config.target_dir: '{config.target_dir}'")
 
         watcher = DirectoryWatcher(config.target_dir, config.config_path)
         watcher.setup()
+        
+        # 🔍 DIAGNOSTIC: Log watcher state after setup (uses target_path, not root_dir)
+        logger.info(f"🔴🔴🔴 [TRACE-4] Watcher target_path after setup: '{watcher.target_path}'")
+        
         file_tree = watcher.run_once()
+        
+        # 🔍 DIAGNOSTIC: Log file tree details
+        logger.info(f"🔴🔴🔴 [TRACE-5] FileTree has {len(file_tree.files)} files")
+        if file_tree.files:
+            first_5_paths = list(file_tree.files.keys())[:5]
+            logger.info(f"🔴🔴🔴 [TRACE-5] First 5 file paths: {first_5_paths}")
 
         if not file_tree.files:
             raise ValueError("No files found in target directory")
@@ -364,7 +679,9 @@ async def run_verification_pipeline(run_id: str) -> None:
                 watcher.detect_primary_language(),
                 precomputed_static_results=(static_results, should_abort, abort_reason)
             )
-            tribunal.save_outputs(run_state.verdict)
+            report_path, verdict_path = tribunal.save_outputs(run_state.verdict)
+            run_state.report_path = report_path
+            run_state.verdict_path = verdict_path
             
             # Save run state to disk immediately
             save_run_history(run_state)
@@ -432,7 +749,9 @@ async def run_verification_pipeline(run_id: str) -> None:
             )
 
         # Save outputs
-        tribunal.save_outputs(verdict)
+        report_path, verdict_path = tribunal.save_outputs(verdict)
+        run_state.report_path = report_path
+        run_state.verdict_path = verdict_path
 
         # Complete
         run_state.state.completed_at = datetime.now()
@@ -491,7 +810,7 @@ async def root() -> Dict[str, Any]:
     """
     health_status = {
         "name": "Dysruption CVA API",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "status": "healthy",
         "checks": {
             "filesystem": "unknown",
@@ -534,8 +853,322 @@ async def root() -> Dict[str, Any]:
     return health_status
 
 
+# =============================================================================
+# TRIBUNAL API ENDPOINTS
+# =============================================================================
+
+
+@app.get("/api/constitution", response_model=ConstitutionInfo)
+async def get_constitution(project_id: Optional[str] = None, commit_hash: Optional[str] = None) -> ConstitutionInfo:
+    """Return active constitution metadata.
+
+    Note: If project_id is omitted, this resolves constitution from the server CWD.
+    """
+    try:
+        project_root = get_project_root(UPLOAD_ROOT, project_id) if project_id else Path(os.getcwd()).resolve()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    _, info = _load_constitution(project_root, commit_hash=commit_hash)
+    return info
+
+
+@app.get("/api/constitution/history", response_model=List[ConstitutionHistoryItem])
+async def get_constitution_history(project_id: Optional[str] = None) -> List[ConstitutionHistoryItem]:
+    """Return git-linked edit history for the constitution file (best-effort)."""
+    try:
+        project_root = get_project_root(UPLOAD_ROOT, project_id) if project_id else Path(os.getcwd()).resolve()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    constitution_path = _find_constitution_path(project_root)
+    rel = constitution_path.relative_to(project_root).as_posix() if constitution_path.exists() else ".tribunal/constitution.md"
+    return _get_git_history_for_path(project_root, rel)
+
+
+def _ensure_success_spec_size_limit(success_spec: Dict[str, Any]) -> None:
+    raw = json.dumps(success_spec, ensure_ascii=False).encode("utf-8")
+    if len(raw) > 128 * 1024:
+        raise HTTPException(status_code=413, detail="success_spec exceeds 128KB")
+
+
+@app.post("/api/intent", status_code=202)
+async def post_intent(payload: IntentEnvelope, request: Request) -> Dict[str, Any]:
+    """Inject per-run intent (Success Spec) into the ephemeral run-state store."""
+    _require_tribunal_api_token(request)
+
+    project_id = _sanitize_str(payload.project_id, max_len=128)
+    origin = _sanitize_str(request.headers.get("origin", ""), max_len=256)
+    if not check_tribunal_rate_limit(project_id, origin):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    success_spec_dict = payload.success_spec.model_dump()
+    _ensure_success_spec_size_limit(success_spec_dict)
+
+    key = str(payload.run_id)
+    await _intent_store.set(key, payload, ttl_seconds=TRIBUNAL_INTENT_TTL_SECONDS)
+
+    # Initialize run status store for this run_id
+    await _tribunal_run_store.set(
+        key,
+        {"status": "intent_received", "project_id": project_id, "created_at": datetime.now().isoformat()},
+        ttl_seconds=max(TRIBUNAL_INTENT_TTL_SECONDS, 600),
+    )
+
+    return {"run_id": key, "status": "accepted", "ttl_seconds": TRIBUNAL_INTENT_TTL_SECONDS}
+
+
+@app.get("/api/intent/{run_id}")
+async def get_intent(run_id: str) -> Dict[str, Any]:
+    """Retrieve stored intent for a run_id."""
+    stored = await _intent_store.get(run_id)
+    if not stored:
+        raise HTTPException(status_code=404, detail="Intent not found or expired")
+    # Return dict to keep response stable even if model changes.
+    return stored.model_dump()
+
+
+async def _emit_initiator_webhook(
+    *,
+    callback_url: str,
+    callback_bearer_token: Optional[str],
+    payload: Dict[str, Any],
+) -> None:
+    try:
+        import httpx
+
+        headers: Dict[str, str] = {"Content-Type": "application/json"}
+        if callback_bearer_token:
+            headers["Authorization"] = f"Bearer {callback_bearer_token}"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(callback_url, json=payload, headers=headers)
+    except Exception as e:
+        logger.warning(f"Initiator webhook failed: {e}")
+
+
+def _verdicts_url_for_run(run_id: str) -> str:
+    base = os.getenv("CVA_PUBLIC_BASE_URL", "").rstrip("/")
+    path = f"/api/verdicts/{run_id}"
+    return f"{base}{path}" if base else path
+
+
+async def _run_tribunal_scan(run_id: str, mode: str) -> None:
+    """Background scan job: diff/full detection -> import resolution -> token-budget context -> judge -> persist -> webhook."""
+
+    stored_intent = await _intent_store.get(run_id)
+    if not stored_intent:
+        await _tribunal_run_store.set(run_id, {"status": "failed", "error_details": "Intent missing/expired"}, ttl_seconds=3600)
+        return
+
+    intent: IntentEnvelope = stored_intent
+    project_id = _sanitize_str(intent.project_id, max_len=128)
+
+    await _tribunal_run_store.set(run_id, {"status": "running", "mode": mode, "project_id": project_id}, ttl_seconds=3600)
+
+    try:
+        project_root = get_project_root(UPLOAD_ROOT, project_id)
+        if not project_root.exists() or not project_root.is_dir():
+            raise HTTPException(status_code=404, detail="Project root not found")
+
+        constitution_text, constitution_info = _load_constitution(project_root, commit_hash=intent.commit_hash)
+
+        diff_start = time.time()
+        diff_result = detect_changed_files(
+            project_root,
+            mode,
+            mtime_window_seconds=TRIBUNAL_MTIME_WINDOW_SECONDS,
+        )
+        diff_ms = int((time.time() - diff_start) * 1000)
+
+        # Resolve imports (best-effort)
+        skipped_imports: List[str] = []
+        import_files: List[str] = []
+        try:
+            imp_res = resolve_imports(project_root, diff_result.changed_files, depth=2)
+            import_files = imp_res.resolved_files
+            skipped_imports = imp_res.skipped_imports
+        except Exception as e:
+            skipped_imports = [f"import_resolution_error:{e}"]
+            import_files = []
+
+        # Build token-budgeted context (changed > imports > constitution)
+        ctx = build_llm_context(
+            project_root,
+            changed_files=diff_result.changed_files,
+            import_files=import_files,
+            constitution_text=constitution_text,
+            token_budget=TRIBUNAL_TOKEN_BUDGET,
+        )
+
+        # Read included files into a deterministic mapping for rule checks and LLM context
+        file_texts: Dict[str, str] = {}
+        for rel in (ctx.included_changed_files + ctx.included_import_files):
+            try:
+                abs_path = (project_root / rel).resolve()
+                if not abs_path.exists() or not abs_path.is_file():
+                    continue
+                # Read with an upper bound
+                raw = abs_path.read_bytes()
+                if len(raw) > 512 * 1024:
+                    raw = raw[:512 * 1024]
+                file_texts[rel] = raw.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+
+        # Judge
+        try:
+            output = await judge_engine(
+                file_texts=file_texts,
+                constitution_text=constitution_text,
+                skipped_imports=skipped_imports,
+                token_count=ctx.token_count,
+                token_budget_partial=ctx.partial,
+                success_spec=intent.success_spec.model_dump(),
+                llm_model=TRIBUNAL_INTENT_LLM_MODEL,
+                llm_timeout_seconds=TRIBUNAL_LLM_TIMEOUT_SECONDS,
+                llm_enabled=True,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("LLM timeout")
+
+        # Persist verdicts
+        run_dir = (RUN_ARTIFACTS_ROOT / run_id).resolve()
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        verdicts_path = run_dir / "tribunal_verdicts.json"
+        verdict_payload: Dict[str, Any] = {
+            "run_id": run_id,
+            "project_id": project_id,
+            "mode": mode,
+            "constitution": constitution_info.model_dump(),
+            "diff_detection": {"detection": diff_result.detection, "changed_files": diff_result.changed_files, "time_ms": diff_ms},
+            "token_budget": {"budget": TRIBUNAL_TOKEN_BUDGET, "token_count": output.metrics.token_count, "partial": output.partial, "truncated_files": ctx.truncated_files, "included_constitution": ctx.included_constitution},
+            "skipped_imports": output.skipped_imports,
+            "unevaluated_rules": output.unevaluated_rules,
+            "metrics": {
+                "scan_time_ms": output.metrics.scan_time_ms,
+                "token_count": output.metrics.token_count,
+                "llm_latency_ms": output.metrics.llm_latency_ms,
+                "violations_count": output.metrics.violations_count,
+            },
+            "verdicts": output.verdicts,
+            "created_at": datetime.now().isoformat(),
+        }
+        verdicts_path.write_text(json.dumps(verdict_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        verdict_summary = {
+            "partial": output.partial,
+            "counts": {
+                "constitution": len([v for v in output.verdicts if v.get("type") == "constitution"]),
+                "intent": len([v for v in output.verdicts if v.get("type") == "intent"]),
+                "total": len(output.verdicts),
+            },
+        }
+
+        await _tribunal_run_store.set(
+            run_id,
+            {"status": "complete", "verdict_summary": verdict_summary, "verdicts_path": str(verdicts_path)},
+            ttl_seconds=3600,
+        )
+
+        # Emit webhook/callback (optional)
+        if intent.initiator and intent.initiator.callback_url:
+            await _emit_initiator_webhook(
+                callback_url=intent.initiator.callback_url,
+                callback_bearer_token=intent.initiator.callback_bearer_token,
+                payload={
+                    "run_id": run_id,
+                    "status": "complete",
+                    "verdict_summary": verdict_summary,
+                    "verdicts_url": _verdicts_url_for_run(run_id),
+                },
+            )
+
+    except Exception as e:
+        error_details = _sanitize_str(str(e), max_len=2000)
+        await _tribunal_run_store.set(run_id, {"status": "failed", "error_details": error_details, "mode": mode}, ttl_seconds=3600)
+        # Best-effort webhook (optional)
+        if intent.initiator and intent.initiator.callback_url:
+            try:
+                await _emit_initiator_webhook(
+                    callback_url=intent.initiator.callback_url,
+                    callback_bearer_token=intent.initiator.callback_bearer_token,
+                    payload={
+                        "run_id": run_id,
+                        "status": "failed",
+                        "verdict_summary": None,
+                        "verdicts_url": _verdicts_url_for_run(run_id),
+                    },
+                )
+            except Exception:
+                pass
+
+
+@app.post("/api/trigger_scan", response_model=TriggerScanResponse, status_code=202)
+async def trigger_scan(payload: TriggerScanRequest, request: Request) -> TriggerScanResponse:
+    _require_tribunal_api_token(request)
+
+    stored_intent = await _intent_store.get(str(payload.run_id))
+    if not stored_intent:
+        raise HTTPException(status_code=404, detail="Intent not found or expired")
+
+    intent: IntentEnvelope = stored_intent
+    project_id = _sanitize_str(intent.project_id, max_len=128)
+    origin = _sanitize_str(request.headers.get("origin", ""), max_len=256)
+    if not check_tribunal_rate_limit(project_id, origin):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+    run_id_str = str(payload.run_id)
+    asyncio.create_task(_run_tribunal_scan(run_id_str, payload.mode.value))
+
+    # Initial response is always partial=false, real partial is in the final verdict payload.
+    return TriggerScanResponse(
+        run_id=payload.run_id,
+        status="queued",
+        verdicts_url=_verdicts_url_for_run(run_id_str),
+        partial=False,
+        skipped_imports=[],
+        unevaluated_rules=[],
+        metrics={"scan_time_ms": 0, "token_count": 0, "llm_latency_ms": None, "violations_count": 0},
+    )
+
+
+@app.get("/api/verdicts/{run_id}")
+async def get_verdicts(run_id: str) -> Dict[str, Any]:
+    # Return persisted verdict payload if present
+    run_dir = (RUN_ARTIFACTS_ROOT / run_id).resolve()
+    verdicts_path = run_dir / "tribunal_verdicts.json"
+    if verdicts_path.exists():
+        try:
+            return json.loads(verdicts_path.read_text(encoding="utf-8"))
+        except Exception:
+            raise HTTPException(status_code=500, detail="Failed to read verdicts")
+
+    status = await _tribunal_run_store.get(run_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Verdicts not found")
+    return status
+
+
+@app.post("/api/retry/{run_id}", status_code=202)
+async def retry_scan(run_id: str, request: Request) -> Dict[str, Any]:
+    _require_tribunal_api_token(request)
+    status = await _tribunal_run_store.get(run_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    if status.get("status") != "failed":
+        raise HTTPException(status_code=409, detail="Only failed runs can be retried")
+
+    mode = status.get("mode") or "diff"
+    asyncio.create_task(_run_tribunal_scan(run_id, mode))
+    return {"run_id": run_id, "status": "queued", "mode": mode}
+
+
 @app.post("/upload")
 async def upload_files(
+    request: Request,
     files: List[UploadFile] = File(...),
     paths: List[str] = Form(...),
     upload_id: Optional[str] = Form(None)
@@ -543,23 +1176,38 @@ async def upload_files(
     """
     Upload files for analysis. Supports batching via upload_id.
     
+    Security features:
+    - Rate limiting per client IP
+    - File size limits
+    - Path sanitization
+    
     - If upload_id is None: Creates new session.
     - If upload_id is provided: Appends to existing session.
     """
+    _require_api_token(request)
+
+    # Rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=429, 
+            detail="Rate limit exceeded. Please wait before making more requests."
+        )
+    
     # Validate or create upload_id
     if upload_id:
         # Security check: Alphanumeric only to prevent traversal
         if not upload_id.isalnum():
              raise HTTPException(status_code=400, detail="Invalid upload_id")
         # Use existing directory
-        temp_dir = Path(os.getcwd()) / "temp_uploads" / upload_id
+        temp_dir = UPLOAD_ROOT / upload_id
         if not temp_dir.exists():
              # If it doesn't exist (expired?), create it
              temp_dir.mkdir(parents=True, exist_ok=True)
     else:
         # Create new session
         upload_id = str(uuid.uuid4())[:8]
-        temp_dir = Path(os.getcwd()) / "temp_uploads" / upload_id
+        temp_dir = UPLOAD_ROOT / upload_id
         temp_dir.mkdir(parents=True, exist_ok=True)
     
     logger.info(f"Upload {upload_id}: Processing batch of {len(files)} files")
@@ -568,6 +1216,9 @@ async def upload_files(
     
     try:
         # Iterate through files and paths (they should match by index)
+        total_size = 0
+        max_size_bytes = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        
         for i, file in enumerate(files):
             # Get relative path from form data, or fallback to filename
             rel_path = paths[i] if i < len(paths) else file.filename
@@ -575,23 +1226,40 @@ async def upload_files(
             # Sanitize path to prevent directory traversal
             clean_rel_path = rel_path.lstrip("/").lstrip("\\").replace("..", "")
             
+            # Additional path sanitization: remove any remaining path traversal attempts
+            clean_rel_path = "/".join(
+                part for part in clean_rel_path.replace("\\", "/").split("/")
+                if part and part != ".."
+            )
+            
             # Construct full path
             file_path = temp_dir / clean_rel_path
             
             # Ensure parent directories exist
             file_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Save file using streaming
+            # Save file using streaming with size limit check
+            file_size = 0
             async with aiofiles.open(file_path, "wb") as f:
                 while True:
                     chunk = await file.read(1024 * 1024)  # 1MB chunks
                     if not chunk:
                         break
+                    file_size += len(chunk)
+                    total_size += len(chunk)
+                    
+                    # Check size limits
+                    if total_size > max_size_bytes:
+                        raise HTTPException(
+                            status_code=413, 
+                            detail=f"Upload size exceeds limit of {MAX_UPLOAD_SIZE_MB}MB"
+                        )
+                    
                     await f.write(chunk)
             
             saved_count += 1
             
-        logger.info(f"Upload {upload_id}: Batch complete, saved {saved_count} files")
+        logger.info(f"Upload {upload_id}: Batch complete, saved {saved_count} files ({total_size / 1024 / 1024:.1f}MB)")
         
         return {
             "upload_id": upload_id,
@@ -600,16 +1268,21 @@ async def upload_files(
             "message": f"Successfully uploaded batch of {saved_count} files"
         }
         
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         logger.error(f"Upload failed: {e}")
-        # Note: We do NOT delete the dir on error anymore, to allow retrying batches
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        # Sanitize error message for production
+        error_msg = "Upload failed due to an internal error" if PRODUCTION_MODE else f"Upload failed: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 
 @app.post("/run", response_model=RunResponse)
 async def start_run(
-    request: RunRequest, background_tasks: BackgroundTasks
+    run_request: RunRequest, 
+    request: Request,
+    background_tasks: BackgroundTasks
 ) -> RunResponse:
     """
     Start a new verification run.
@@ -617,7 +1290,21 @@ async def start_run(
     Initiates the CVA pipeline in the background and returns a run_id
     for tracking progress via /status or /ws endpoints.
     """
-    target_dir = request.target_dir.strip()
+    _require_api_token(request)
+
+    # Rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=429, 
+            detail="Rate limit exceeded. Please wait before making more requests."
+        )
+    
+    target_dir = run_request.target_dir.strip()
+    
+    # 🔍 DIAGNOSTIC: Log exactly what the API received
+    logger.info(f"🔴🔴🔴 [TRACE-1] /run API received target_dir: '{target_dir}'")
+    logger.info(f"🔴🔴🔴 [TRACE-1] Full request: {run_request.model_dump()}")
     
     # =========================================================================
     # PATH VALIDATION (Bulletproof security checks)
@@ -709,21 +1396,45 @@ async def start_run(
             status_code=400, detail=f"Path is not a directory: {target_dir}"
         )
 
+    # PRODUCTION LOCKDOWN: only allow scanning uploaded projects.
+    if PRODUCTION_MODE:
+        if not _is_path_within_root(target_dir, UPLOAD_ROOT):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "In production, scanning is restricted to uploaded projects only. "
+                    "Upload a project first, then pass the returned temp_uploads path to /run."
+                ),
+            )
+
     # =========================================================================
     # START THE RUN
     # =========================================================================
     
     # Generate run ID
     run_id = str(uuid.uuid4())[:8]
+    
+    # 🔍 DIAGNOSTIC: Verify path exists right before creating config
+    logger.info(f"🔴🔴🔴 [TRACE-2] Creating config for run {run_id}")
+    logger.info(f"🔴🔴🔴 [TRACE-2] target_dir = '{target_dir}'")
+    logger.info(f"🔴🔴🔴 [TRACE-2] os.path.exists = {os.path.exists(target_dir)}")
+    logger.info(f"🔴🔴🔴 [TRACE-2] os.path.isdir = {os.path.isdir(target_dir)}")
+    
+    # List first 10 items in directory for verification
+    try:
+        items = os.listdir(target_dir)[:10]
+        logger.info(f"🔴🔴🔴 [TRACE-2] First 10 items in dir: {items}")
+    except Exception as e:
+        logger.error(f"🔴🔴🔴 [TRACE-2] Failed to list dir: {e}")
 
     # Create run config
     config = RunConfig(
         target_dir=target_dir,
-        spec_path=request.spec_path or "spec.txt",
-        spec_content=request.spec_content,  # Pass constitution text if provided
+        spec_path=run_request.spec_path or "spec.txt",
+        spec_content=run_request.spec_content,  # Pass constitution text if provided
         config_path="config.yaml",
-        generate_patches=request.generate_patches,
-        watch_mode=request.watch_mode,
+        generate_patches=run_request.generate_patches,
+        watch_mode=run_request.watch_mode,
     )
 
     # Initialize run state
@@ -802,14 +1513,14 @@ async def get_verdict(run_id: str) -> VerdictResponse:
             ),
         )
         
-        # Load REPORT.md content if it exists
+        # Load per-run REPORT.md content if it exists
         try:
-            report_path = Path("REPORT.md")
-            if report_path.exists():
+            report_path = Path(run_state.report_path) if run_state.report_path else None
+            if report_path and report_path.exists():
                 report_markdown = report_path.read_text(encoding="utf-8")
-                logger.info(f"Loaded REPORT.md: {len(report_markdown)} chars")
+                logger.info(f"Loaded per-run REPORT.md: {len(report_markdown)} chars")
         except Exception as e:
-            logger.warning(f"Could not load REPORT.md: {e}")
+            logger.warning(f"Could not load per-run REPORT.md: {e}")
     
     # Combine all patch diffs into a single string
     if run_state.patches and run_state.patches.patches:
@@ -1096,7 +1807,7 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     """Initialize on startup."""
-    logger.info("CVA API v1.1 starting up...")
+    logger.info("CVA API v1.2 starting up...")
     logger.info("Endpoints: /run, /status/{run_id}, /verdict/{run_id}, /ws/{run_id}")
 
 

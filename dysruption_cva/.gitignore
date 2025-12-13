@@ -26,6 +26,8 @@ wheels/
 
 # Virtual environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -69,3 +71,17 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# User uploads - NEVER commit these
+temp_uploads/*
+!temp_uploads/.gitkeep
+
+# Per-run artifacts - NEVER commit these
+run_artifacts/
+
+# Generated runtime files
+run_history.json
+
+# Test artifacts
+test_upload.zip
+*.zip

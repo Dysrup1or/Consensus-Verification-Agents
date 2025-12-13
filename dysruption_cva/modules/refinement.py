@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -580,6 +581,36 @@ def analyze_and_refine(
     return generator.generate_refinement_prompt(
         summary=summary,
         failed_criteria=failed_criteria,
+        spec_summary=spec_summary,
+    )
+
+
+def analyze_and_refine_run(
+    run_id: str,
+    config_path: str = "config.yaml",
+    spec_summary: Optional[str] = None,
+    artifacts_root: Optional[str] = None,
+) -> RefinementPrompt:
+    """Analyze a per-run REPORT.md located under the run artifacts directory.
+
+    This is intended for API/server usage where multiple concurrent runs must not
+    share a single global REPORT.md.
+
+    Args:
+        run_id: Run identifier (e.g., "a1b2c3d4")
+        config_path: Path to config.yaml
+        spec_summary: Optional specification summary for context
+        artifacts_root: Base directory containing run artifacts. Defaults to the
+            RUN_ARTIFACTS_ROOT env var or "run_artifacts".
+
+    Returns:
+        RefinementPrompt
+    """
+    root = artifacts_root or os.getenv("CVA_RUN_ARTIFACTS_ROOT") or "run_artifacts"
+    report_path = str(Path(root) / run_id / "REPORT.md")
+    return analyze_and_refine(
+        report_path=report_path,
+        config_path=config_path,
         spec_summary=spec_summary,
     )
 

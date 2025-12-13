@@ -114,7 +114,7 @@ watcher:
 # Static Analysis
 static_analysis:
   enabled: true
-  fail_fast: false  # Disabled for testing - allows full tribunal evaluation
+  fail_fast: true  # Critical issues abort pipeline before LLM calls
   pylint:
     enabled: true
     max_line_length: 120

@@ -157,6 +157,9 @@ curl http://localhost:8000/status/abc123
 curl http://localhost:8000/verdict/abc123
 ```
 
+When running with `CVA_PRODUCTION=true`, `/upload` and `/run` require an auth token.
+Provide it as either `Authorization: Bearer <token>` or `X-API-Token: <token>`.
+
 ### Options
 
 ```

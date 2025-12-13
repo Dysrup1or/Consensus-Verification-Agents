@@ -16,7 +16,39 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
+from uuid import UUID
+
 from pydantic import BaseModel, Field, field_validator
+
+# Phase 2: shared contract models (optional dependency)
+try:
+    from catalyze_contract import (
+        Initiator as ContractInitiator,
+        SuccessSpec as ContractSuccessSpec,
+        IntentEnvelope as ContractIntentEnvelope,
+        TriggerScanMode as ContractTriggerScanMode,
+        TriggerScanRequest as ContractTriggerScanRequest,
+        TriggerScanResponse as ContractTriggerScanResponse,
+        TribunalSeverity as ContractTribunalSeverity,
+        TribunalVerdictType as ContractTribunalVerdictType,
+        TribunalVerdictItem as ContractTribunalVerdictItem,
+        TribunalMetrics as ContractTribunalMetrics,
+        VerdictStatus as ContractVerdictStatus,
+        VerdictResponse as ContractVerdictResponse,
+    )
+except Exception:
+    ContractInitiator = None
+    ContractSuccessSpec = None
+    ContractIntentEnvelope = None
+    ContractTriggerScanMode = None
+    ContractTriggerScanRequest = None
+    ContractTriggerScanResponse = None
+    ContractTribunalSeverity = None
+    ContractTribunalVerdictType = None
+    ContractVerdictStatus = None
+    ContractVerdictResponse = None
+    ContractTribunalVerdictItem = None
+    ContractTribunalMetrics = None
 
 
 # =============================================================================
@@ -75,6 +107,143 @@ class PipelineStatus(str, Enum):
     PATCHING = "patching"
     COMPLETE = "complete"
     ERROR = "error"
+
+
+# =============================================================================
+# TRIBUNAL API (Constitution + Intent + Verdicts)
+# =============================================================================
+
+
+if ContractTribunalVerdictType is not None:
+    TribunalVerdictType = ContractTribunalVerdictType  # type: ignore
+else:
+    class TribunalVerdictType(str, Enum):
+        CONSTITUTION = "constitution"
+        INTENT = "intent"
+
+
+if ContractTribunalSeverity is not None:
+    TribunalSeverity = ContractTribunalSeverity  # type: ignore
+else:
+    class TribunalSeverity(str, Enum):
+        CRITICAL = "critical"
+        HIGH = "high"
+        MEDIUM = "medium"
+        LOW = "low"
+
+
+class ConstitutionInfo(BaseModel):
+    path: str
+    commit_hash: Optional[str] = None
+    snippet_length: int = Field(..., ge=0)
+
+
+class ConstitutionHistoryItem(BaseModel):
+    commit_hash: str
+    author: Optional[str] = None
+    authored_at: Optional[str] = None
+    subject: Optional[str] = None
+
+
+if ContractInitiator is not None:
+    Initiator = ContractInitiator  # type: ignore
+else:
+    class Initiator(BaseModel):
+        # Assumption required by spec: initiator must provide a callback target.
+        callback_url: str = Field(..., min_length=8)
+        # Optional bearer token forwarded to callback.
+        callback_bearer_token: Optional[str] = None
+
+
+if ContractSuccessSpec is not None:
+    SuccessSpec = ContractSuccessSpec  # type: ignore
+else:
+    class SuccessSpec(BaseModel):
+        # Backward-compatible schema for intent preservation.
+        #
+        # Catalyze (Promptly) fields:
+        intent_summary: Optional[str] = Field(default=None, max_length=2000)
+        key_constraints: List[str] = Field(default_factory=list)
+        expected_behavior: Optional[str] = Field(default=None, max_length=2000)
+
+        # Legacy/minimal contract fields (kept for existing clients):
+        acceptance_criteria: List[str] = Field(default_factory=list)
+        notes: Optional[str] = Field(default=None, max_length=4000)
+
+        @field_validator("key_constraints", "acceptance_criteria")
+        @classmethod
+        def _limit_list_sizes(cls, v: List[str]) -> List[str]:
+            # Defensive cap: avoid unbounded lists causing prompt/context bloat.
+            if not v:
+                return []
+            return [str(x)[:500] for x in v[:50]]
+
+
+if ContractIntentEnvelope is not None:
+    IntentEnvelope = ContractIntentEnvelope  # type: ignore
+else:
+    class IntentEnvelope(BaseModel):
+        run_id: UUID
+        project_id: str = Field(..., min_length=1, max_length=128)
+        initiator: Optional[Initiator] = None
+        commit_hash: Optional[str] = Field(default=None, max_length=64)
+        success_spec: SuccessSpec
+
+
+if ContractTriggerScanMode is not None:
+    TriggerScanMode = ContractTriggerScanMode  # type: ignore
+else:
+    class TriggerScanMode(str, Enum):
+        DIFF = "diff"
+        FULL = "full"
+
+
+if ContractTriggerScanRequest is not None:
+    TriggerScanRequest = ContractTriggerScanRequest  # type: ignore
+else:
+    class TriggerScanRequest(BaseModel):
+        run_id: UUID
+        mode: TriggerScanMode = TriggerScanMode.DIFF
+
+
+if ContractTribunalVerdictItem is not None:
+    TribunalVerdictItem = ContractTribunalVerdictItem  # type: ignore
+else:
+    class TribunalVerdictItem(BaseModel):
+        id: str
+        type: TribunalVerdictType
+        rule_id: str
+        severity: TribunalSeverity
+        file: Optional[str] = None
+        line_start: int = Field(..., ge=1)
+        line_end: int = Field(..., ge=1)
+        message: str
+        suggested_fix: Optional[str] = None
+        auto_fixable: bool = False
+        confidence: float = Field(..., ge=0.0, le=1.0)
+
+
+if ContractTribunalMetrics is not None:
+    TribunalMetrics = ContractTribunalMetrics  # type: ignore
+else:
+    class TribunalMetrics(BaseModel):
+        scan_time_ms: int = Field(..., ge=0)
+        token_count: int = Field(..., ge=0)
+        llm_latency_ms: Optional[int] = Field(default=None, ge=0)
+        violations_count: int = Field(..., ge=0)
+
+
+if ContractTriggerScanResponse is not None:
+    TriggerScanResponse = ContractTriggerScanResponse  # type: ignore
+else:
+    class TriggerScanResponse(BaseModel):
+        run_id: UUID
+        status: str
+        verdicts_url: str
+        partial: bool = False
+        skipped_imports: List[str] = Field(default_factory=list)
+        unevaluated_rules: List[str] = Field(default_factory=list)
+        metrics: TribunalMetrics
 
 
 # =============================================================================

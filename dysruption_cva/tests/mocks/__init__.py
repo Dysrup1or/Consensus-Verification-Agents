@@ -1,5 +1,5 @@
 """
-Test mocks package for CVA v1.1
+Test mocks package for CVA v1.2
 
 Provides deterministic JSON responses for testing without API calls.
 """

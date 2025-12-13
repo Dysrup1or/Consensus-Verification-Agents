@@ -11,6 +11,11 @@ __pycache__/
 venv/
 .env
 
+# Common env var files (keep templates like .env.example tracked)
+.env.*
+!.env.example
+!.env.sample
+
 # IDE/Editor
 .idea/
 .vscode/
@@ -26,6 +31,14 @@ logs/
 *.tmp
 temp/
 tmp/
+
+# Data/artifacts (never commit)
+*.db
+*.sqlite
+*.sqlite3
+*.zip
+*.tar
+*.tar.gz
 
 # Analysis artifacts (regenerated)
 CVA_RUN_ANALYSIS_*.md
@@ -44,6 +57,13 @@ Thumbs.db
 
 # Uploaded user files (handled per-subdirectory)
 # Note: dysruption_cva/temp_uploads/ is ignored in that dir's .gitignore
+
+# Defense-in-depth: ignore upload/artifact dirs even if nested ignore changes
+# Note: ignore contents, but allow keeping a tracked .gitkeep.
+dysruption_cva/temp_uploads/*
+!dysruption_cva/temp_uploads/.gitkeep
+dysruption_cva/run_artifacts/
+dysruption_cva/run_history.json
 
 # Runtime state files
 run_history.json
