@@ -7,6 +7,7 @@ import httpx
 
 from modules.api import app
 from modules.judge_engine import JudgeMetrics, JudgeOutput
+from modules.router import RouterDecision
 
 
 @pytest.mark.anyio
@@ -27,8 +28,24 @@ async def test_agent_intent_trigger_verdict_webhook_flow(tmp_path: Path, monkeyp
     api.RUN_ARTIFACTS_ROOT = tmp_path / "run_artifacts"
     api.API_TOKEN = "testtoken"
 
+    # Stub router so tests don't depend on real provider env/auth.
+    async def fake_route_llm(**kwargs):
+        return RouterDecision(
+            lane_requested="lane2",
+            lane_used="lane2",
+            provider="local",
+            model="local/test-model",
+            reason="lane2_selected",
+            fallback_chain=[],
+        )
+
+    monkeypatch.setattr(api, "route_llm", fake_route_llm)
+
     # Stub judge_engine to avoid real LLM usage
+    captured_kwargs = {}
+
     async def fake_judge_engine(**kwargs):
+        captured_kwargs.update(kwargs)
         return JudgeOutput(
             verdicts=[],
             partial=False,
@@ -78,6 +95,24 @@ async def test_agent_intent_trigger_verdict_webhook_flow(tmp_path: Path, monkeyp
         assert captured["payload"]["run_id"] == run_id
         assert captured["payload"]["status"] in {"complete", "failed"}
 
-        # Verdicts endpoint should eventually exist (may be minimal)
+        # Persisted verdict artifact should exist and include telemetry.
+        verdict_path = (api.RUN_ARTIFACTS_ROOT / run_id / "tribunal_verdicts.json").resolve()
+        for _ in range(50):
+            if verdict_path.exists():
+                break
+            await asyncio.sleep(0.05)
+
+        assert verdict_path.exists()
+        data = verdict_path.read_text(encoding="utf-8")
+        assert "\"telemetry\"" in data
+
+        # Verdicts endpoint should return persisted payload.
         r3 = await client.get(f"/api/verdicts/{run_id}")
-        assert r3.status_code in {200, 404}  # background timing variability
+        assert r3.status_code == 200
+        payload = r3.json()
+        assert "telemetry" in payload
+        assert "coverage" in payload["telemetry"]
+
+        # Phase 3: routed model is used + persisted.
+        assert captured_kwargs.get("llm_model") == "local/test-model"
+        assert payload["telemetry"].get("router", {}).get("model") == "local/test-model"

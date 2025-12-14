@@ -4,9 +4,9 @@ The frontend dashboard for the Consensus Verifier Agent (CVA).
 
 ## Stack
 - **Framework**: Next.js 14 (App Router)
-- **Styling**: Tailwind CSS + Custom Cyberpunk Theme
-- **State**: React Hooks + WebSocket
-- **Testing**: Jest (Unit) + Cypress (E2E)
+- **Styling**: Tailwind CSS (dark, professional)
+- **State**: React Hooks + WebSocket (with HTTP polling fallback)
+- **Testing**: Jest (Unit)
 
 ## Getting Started
 
@@ -19,38 +19,40 @@ The frontend dashboard for the Consensus Verifier Agent (CVA).
 npm install
 ```
 
-### Running in Mock Mode (Development)
-Run the UI with a built-in mock server that simulates the CVA pipeline events.
-```bash
-# Linux/Mac
-USE_MOCK=true npm run dev
-
-# Windows (PowerShell)
-$env:USE_MOCK="true"; npm run dev
-```
-Visit `http://localhost:3000`.
-
 ### Running with Real Backend
 1. Start the FastAPI backend:
    ```bash
    cd ../dysruption_cva
-   uvicorn modules.api:app --reload
+  # Local dev default is port 8001
+  python -m uvicorn modules.api:app --reload --host 0.0.0.0 --port 8001
    ```
 2. Start the UI:
    ```bash
    npm run dev
    ```
 
+### Authentication (Google / GitHub)
+
+The dashboard uses NextAuth and supports Google + GitHub OAuth.
+
+- Copy `.env.example` to `.env.local` and fill:
+  - `NEXTAUTH_SECRET`, `NEXTAUTH_URL`
+  - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+  - `GITHUB_ID`, `GITHUB_SECRET`
+- In production, the UI proxies requests to the backend and attaches `CVA_API_TOKEN` server-side.
+
+Required backend settings in production:
+- `CVA_PRODUCTION=true`
+- `CVA_API_TOKEN=<same token the UI uses>`
+
 ## Features
 - **Real-time Status**: WebSocket connection to CVA backend.
 - **Verdict Visualization**: 3-judge tribunal cards with revealable notes.
-- **Veto Highlighting**: Pulsing red alert for security vetoes.
 - **Patch Diff**: Syntax-highlighted unified diff viewer.
-- **Spec View**: Live constitution invariant tracking.
 
 ## API & WebSocket Schemas
 
-### WebSocket Events (`ws://localhost:8000/ws`)
+### WebSocket Events (`ws://localhost:8001/ws`)
 
 **watcher:update**
 ```json
@@ -113,7 +115,26 @@ Visit `http://localhost:3000`.
 npm test
 ```
 
-**E2E Tests**
-```bash
-npm run cypress:open
-```
+## Railway deployment notes
+
+Railway deploys the backend and UI as separate services (recommended):
+
+- **Backend service**
+  - Root directory: `dysruption_cva`
+  - Start command: `bash start.sh`
+  - Railway provides `PORT` automatically; `start.sh` binds to it.
+  - Set env vars:
+    - `CVA_PRODUCTION=true`
+    - `CVA_API_TOKEN=...`
+
+- **UI service**
+  - Root directory: `dysruption-ui`
+  - Build command: `npm run build`
+  - Start command: `npm start` (binds to Railway `PORT`)
+  - Set env vars:
+    - `NEXTAUTH_URL=https://<your-ui-domain>`
+    - `NEXTAUTH_SECRET=...`
+    - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+    - `GITHUB_ID` / `GITHUB_SECRET`
+    - `CVA_BACKEND_URL=https://<your-backend-domain>`
+    - `CVA_API_TOKEN=...` (same token as backend)

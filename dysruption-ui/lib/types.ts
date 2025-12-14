@@ -227,3 +227,47 @@ export interface PromptResponse {
   message: string;
   prompt: PromptRecommendation | null;
 }
+
+// =============================================================================
+// TRIBUNAL VERDICTS PAYLOAD (Phase 6 UI diagnostics)
+// =============================================================================
+
+export interface TelemetryCoverage {
+  fully_covered_percent_of_changed: number;
+  changed_files_total: number;
+  changed_files_fully_covered_count: number;
+  header_covered_count: number;
+  forced_files_count: number;
+  skip_reasons: Record<string, string>;
+}
+
+export interface TelemetryRouter {
+  lane_used: string;
+  provider: string;
+  model: string;
+  fallback_chain: Array<Record<string, string>>;
+}
+
+export interface TelemetryCache {
+  cached_vs_uncached: 'unknown' | 'cached' | 'uncached' | string;
+  intent?: string | null;
+  provider_cache_signal?: string | null;
+}
+
+export interface TelemetryLatency {
+  lane2_llm_batch_size?: number | null;
+  lane2_llm_batch_mode?: string | null;
+  lane2_llm_per_item_latency_ms?: number[] | null;
+}
+
+export interface RunTelemetry {
+  coverage: TelemetryCoverage;
+  router?: TelemetryRouter | null;
+  cache: TelemetryCache;
+  latency: TelemetryLatency;
+}
+
+export interface VerdictsPayload {
+  telemetry?: RunTelemetry | null;
+  [key: string]: any;
+}

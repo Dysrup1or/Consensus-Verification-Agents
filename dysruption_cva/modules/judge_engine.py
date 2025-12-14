@@ -11,7 +11,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -40,6 +40,18 @@ class JudgeOutput:
     skipped_imports: List[str]
     unevaluated_rules: List[str]
     metrics: JudgeMetrics
+    # Best-effort timing details for Phase 0 telemetry (does not affect behavior).
+    timings: Dict[str, int] = field(default_factory=dict)
+    # Phase 5: best-effort provider cost/batch details.
+    llm_batch: Dict[str, Any] = field(default_factory=dict)
+
+
+_INTENT_JUDGE_STABLE_PREFIX = (
+    "You are an intent verification judge.\n"
+    "Given the SUCCESS_SPEC JSON and the CODE CONTEXT, identify any mismatches.\n"
+    "Output STRICT JSON: {\"violations\": [{\"rule_id\":...,\"severity\":...,\"file\":...,\"line_start\":...,\"line_end\":...,\"message\":...,\"suggested_fix\":...,\"auto_fixable\":false,\"confidence\":0.0-1.0}]}\n"
+    "Do not include extra keys."
+)
 
 
 _DEFAULT_MIN_CONSTITUTION = """# CVA Minimal Constitution\n\n- The project MUST NOT contain obvious secrets (API keys, private keys).\n- The project MUST NOT use `eval()` on untrusted input.\n"""
@@ -165,29 +177,37 @@ async def run_intent_llm_checks(
     if not LITELLM_AVAILABLE:
         raise RuntimeError("LiteLLM is not available")
 
-    prompt = (
-        "You are an intent verification judge.\n"
-        "Given the SUCCESS_SPEC JSON and the CODE CONTEXT, identify any mismatches.\n"
-        "Output STRICT JSON: {\"violations\": [{\"rule_id\":...,\"severity\":...,\"file\":...,\"line_start\":...,\"line_end\":...,\"message\":...,\"suggested_fix\":...,\"auto_fixable\":false,\"confidence\":0.0-1.0}]}\n"
-        "Do not include extra keys.\n\n"
+    # Phase 5 (P5.1): stable prefix split for cache-friendliness.
+    stable_prefix = _INTENT_JUDGE_STABLE_PREFIX
+    variable_suffix = (
         f"SUCCESS_SPEC:\n{json.dumps(success_spec, ensure_ascii=False)[:131072]}\n\n"
         f"CODE_CONTEXT:\n{context}\n"
     )
 
     start = time.time()
 
-    async def _call() -> Any:
-        return await litellm.acompletion(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
+    from .provider_adapter import acompletion_batch
+    from .provider_adapter import build_messages_with_stable_prefix
+
+    messages = build_messages_with_stable_prefix(stable_prefix=stable_prefix, variable_suffix=variable_suffix)
+
+    async def _call_one(msgs: List[Dict[str, str]]) -> Any:
+        return await litellm.acompletion(model=model, messages=msgs, temperature=0)
 
     try:
-        resp = await asyncio.wait_for(_call(), timeout=timeout_seconds)
+        resps, tel = await acompletion_batch(
+            model=model,
+            batch_messages=[messages],
+            timeout_seconds=timeout_seconds,
+            provider_call=_call_one,
+            max_concurrency=1,
+        )
+        resp = resps[0]
     except asyncio.TimeoutError:
         raise
 
+    # For backward compatibility, we keep returning a single llm_latency_ms.
+    # The batch primitive still emits per-item timings for telemetry.
     latency_ms = int((time.time() - start) * 1000)
 
     content = ""
@@ -231,6 +251,7 @@ async def run_intent_llm_checks(
 async def judge_engine(
     *,
     file_texts: Dict[str, str],
+    file_texts_for_deterministic: Optional[Dict[str, str]] = None,
     constitution_text: str,
     skipped_imports: List[str],
     token_count: int,
@@ -245,7 +266,11 @@ async def judge_engine(
     start = time.time()
     rules = parse_constitution_rules(constitution_text)
 
-    const_verdicts, unevaluated = run_constitution_regex_checks(rules=rules, file_texts=file_texts)
+    det_texts = file_texts_for_deterministic if file_texts_for_deterministic is not None else file_texts
+    const_verdicts, unevaluated = run_constitution_regex_checks(rules=rules, file_texts=det_texts)
+
+    det_done = time.time()
+    det_ms = int((det_done - start) * 1000)
 
     intent_verdicts: List[Dict[str, Any]] = []
     llm_latency_ms: Optional[int] = None
@@ -254,6 +279,7 @@ async def judge_engine(
         # Note: token_budget_partial may mean constitution/context was truncated.
         # We still attempt intent checks unless asked to disable.
         context_for_llm = "\n".join([f"# FILE: {p}\n{t}" for p, t in file_texts.items()])
+        llm_batch_details: Dict[str, Any] = {}
         try:
             intent_verdicts, llm_latency_ms = await run_intent_llm_checks(
                 success_spec=success_spec,
@@ -261,6 +287,8 @@ async def judge_engine(
                 model=llm_model,
                 timeout_seconds=llm_timeout_seconds,
             )
+            # Phase 5 (P5.2): single-call uses batch primitive internally.
+            llm_batch_details = {"batch_size": 1, "mode": "single", "per_item_latency_ms": [int(llm_latency_ms or 0)]}
         except asyncio.TimeoutError:
             raise
 
@@ -286,10 +314,16 @@ async def judge_engine(
         violations_count=len(verdicts),
     )
 
+    # TTFF definition (Phase 0): time until first deterministic finding is computed,
+    # or deterministic checks completed if none found.
+    ttff_ms = det_ms
+
     return JudgeOutput(
         verdicts=verdicts,
         partial=partial,
         skipped_imports=skipped_imports,
         unevaluated_rules=sorted(set(unevaluated)),
         metrics=metrics,
+        timings={"deterministic_ms": det_ms, "ttff_ms": ttff_ms},
+        llm_batch=llm_batch_details if llm_enabled else {},
     )

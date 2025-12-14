@@ -1,7 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  env: {
-    NEXT_PUBLIC_USE_MOCK: process.env.USE_MOCK,
+  // Intentionally minimal; configure API endpoints via NEXT_PUBLIC_API_URL / NEXT_PUBLIC_WS_URL
+  output: 'export',
+  images: {
+    unoptimized: true,
   },
 };
 

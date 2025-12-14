@@ -249,7 +249,8 @@ def check_module_imports() -> CheckResult:
 def check_port_availability() -> CheckResult:
     """Check if required ports are available."""
     import socket
-    ports = {"Backend (8000)": 8000, "Frontend (3000)": 3000}
+    # Backend runs on 8001 (see dysruption_cva/STARTUP.md)
+    ports = {"Backend (8001)": 8001, "Frontend (3000)": 3000}
     in_use = []
     
     for name, port in ports.items():
@@ -266,7 +267,126 @@ def check_port_availability() -> CheckResult:
             f"Ports in use: {', '.join(in_use)}",
             "Stop conflicting services or use different ports"
         )
-    return CheckResult("Port Availability", Status.PASS, "Ports 8000 and 3000 available")
+    return CheckResult("Port Availability", Status.PASS, "Ports 8001 and 3000 available")
+
+
+def check_llm_models_accessible() -> CheckResult:
+    """Best-effort validation that configured LLM model names are reachable.
+
+    This is OPT-IN to avoid accidental API calls/costs.
+
+    Enable by setting env var: CVA_PREFLIGHT_VALIDATE_MODELS=1
+    """
+
+    if os.environ.get("CVA_PREFLIGHT_VALIDATE_MODELS", "").strip() not in {"1", "true", "TRUE", "yes", "YES"}:
+        return CheckResult(
+            "LLM Model Validation",
+            Status.SKIP,
+            "Skipped (set CVA_PREFLIGHT_VALIDATE_MODELS=1 to enable)",
+        )
+
+    # Load models from config.yaml
+    config_path = BACKEND_DIR / "config.yaml"
+    if not config_path.exists():
+        return CheckResult("LLM Model Validation", Status.FAIL, "config.yaml not found")
+
+    try:
+        import yaml
+
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8", errors="replace")) or {}
+    except Exception as e:
+        return CheckResult("LLM Model Validation", Status.FAIL, f"Could not read config.yaml: {e}")
+
+    llms = (config.get("llms") or {})
+    # Support both historical layouts: top-level llms, or llms under another key.
+    if "llms" in config and isinstance(config.get("llms"), dict):
+        llms = config["llms"]
+    elif "llms" in (config.get("llm") or {}):
+        llms = (config.get("llm") or {}).get("llms") or {}
+
+    # In current config.yaml, llms are under llms: { architect: {model: ...}, ... }
+    if "llms" in llms and isinstance(llms.get("llms"), dict):
+        llms = llms["llms"]
+
+    models: List[str] = []
+    for _, cfg in (llms or {}).items():
+        if isinstance(cfg, dict) and isinstance(cfg.get("model"), str):
+            models.append(cfg["model"])
+
+    # Also validate fallback chain if present.
+    fb = config.get("fallback") or {}
+    if isinstance(fb, dict):
+        if isinstance(fb.get("models"), list):
+            models.extend([m for m in fb.get("models") if isinstance(m, str)])
+        if isinstance(fb.get("model"), str):
+            models.append(fb["model"])
+
+    models = sorted({m.strip() for m in models if m and m.strip()})
+    if not models:
+        return CheckResult("LLM Model Validation", Status.WARN, "No models found in config.yaml")
+
+    # Require provider keys (if missing, skip rather than fail).
+    env_path = BACKEND_DIR / ".env"
+    env_text = env_path.read_text(encoding="utf-8", errors="ignore") if env_path.exists() else ""
+    required_keys = ["ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"]
+    if not any(k in env_text or os.environ.get(k) for k in required_keys):
+        return CheckResult(
+            "LLM Model Validation",
+            Status.SKIP,
+            "Skipped (no API keys found in .env or environment)",
+        )
+
+    try:
+        import litellm
+    except Exception:
+        return CheckResult("LLM Model Validation", Status.SKIP, "Skipped (litellm not installed)")
+
+    failures: List[str] = []
+    warnings: List[str] = []
+
+    # Cheap ping (min tokens) with a short timeout.
+    messages = [{"role": "user", "content": "ping"}]
+    for model in models:
+        try:
+            litellm.completion(
+                model=model,
+                messages=messages,
+                max_tokens=1,
+                temperature=0.0,
+                timeout=12,
+            )
+        except Exception as e:
+            et = type(e).__name__
+            msg = str(e)
+
+            # Treat model-not-found as hard fail; rate limits/timeouts as warnings.
+            is_not_found = "NotFound" in et or "not_found" in msg.lower() or "model not" in msg.lower()
+            is_rate_limit = "Rate" in et or "429" in msg or "limit" in msg.lower()
+            is_timeout = "Timeout" in et or "timed out" in msg.lower()
+
+            if is_not_found:
+                failures.append(model)
+            elif is_rate_limit or is_timeout:
+                warnings.append(f"{model} ({et})")
+            else:
+                warnings.append(f"{model} ({et})")
+
+    if failures:
+        return CheckResult(
+            "LLM Model Validation",
+            Status.FAIL,
+            f"Model(s) not found: {', '.join(failures[:3])}{'...' if len(failures) > 3 else ''}",
+            "Update dysruption_cva/config.yaml to valid model names",
+        )
+    if warnings:
+        return CheckResult(
+            "LLM Model Validation",
+            Status.WARN,
+            f"Some models could not be validated: {', '.join(warnings[:2])}{'...' if len(warnings) > 2 else ''}",
+            "Check API keys, provider status, and model names",
+        )
+
+    return CheckResult("LLM Model Validation", Status.PASS, f"Validated {len(models)} model(s)")
 
 def check_git_status() -> CheckResult:
     """Check for uncommitted changes."""
@@ -303,6 +423,7 @@ ALL_CHECKS: List[Callable[[], CheckResult]] = [
     check_frontend_files,
     check_frontend_deps,
     check_config_yaml,
+    check_llm_models_accessible,
     check_module_imports,
     check_port_availability,
     check_git_status,

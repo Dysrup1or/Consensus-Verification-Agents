@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dysruption.ai/schemas/tribunal_verdict_item.schema.json",
+  "title": "TribunalVerdictItem",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 8 },
+    "type": { "type": "string", "enum": ["constitution", "intent"] },
+    "rule_id": { "type": "string", "minLength": 1 },
+    "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+    "file": { "type": ["string", "null"] },
+    "line_start": { "type": "integer", "minimum": 1 },
+    "line_end": { "type": "integer", "minimum": 1 },
+    "message": { "type": "string", "minLength": 1 },
+    "suggested_fix": { "type": ["string", "null"] },
+    "auto_fixable": { "type": "boolean" },
+    "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+  },
+  "required": [
+    "id",
+    "type",
+    "rule_id",
+    "severity",
+    "line_start",
+    "line_end",
+    "message",
+    "auto_fixable",
+    "confidence"
+  ]
+}

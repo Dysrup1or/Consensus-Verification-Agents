@@ -39,45 +39,6 @@ export default function FileDropZone({ onFilesSelected, acceptedTypes, disabled 
     setIsDragOver(false);
   }, []);
 
-  // Recursive file scanner
-  const scanFiles = async (item: any, path: string = ''): Promise<{ file: File, path: string }[]> => {
-    if (item.isFile) {
-      return new Promise((resolve) => {
-        item.file((file: File) => {
-          resolve([{ file, path: path + file.name }]);
-        });
-      });
-    } else if (item.isDirectory) {
-      // Skip node_modules and .git
-      if (item.name === 'node_modules' || item.name === '.git' || item.name === '.venv' || item.name === '__pycache__') {
-        return [];
-      }
-
-      const dirReader = item.createReader();
-      const entries: any[] = [];
-
-      const readEntries = async () => {
-        const result = await new Promise<any[]>((resolve) => {
-          dirReader.readEntries((res: any[]) => resolve(res));
-        });
-
-        if (result.length > 0) {
-          entries.push(...result);
-          await readEntries(); // Continue reading (Chrome limit is 100)
-        }
-      };
-
-      await readEntries();
-
-      const results = await Promise.all(
-        entries.map(entry => scanFiles(entry, path + item.name + '/'))
-      );
-
-      return results.flat();
-    }
-    return [];
-  };
-
   const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -94,6 +55,45 @@ export default function FileDropZone({ onFilesSelected, acceptedTypes, disabled 
     setDropError(null);
 
     try {
+      // Recursive file scanner (scoped here to avoid hook dependency churn)
+      const scanFiles = async (item: any, path: string = ''): Promise<{ file: File, path: string }[]> => {
+        if (item.isFile) {
+          return new Promise((resolve) => {
+            item.file((file: File) => {
+              resolve([{ file, path: path + file.name }]);
+            });
+          });
+        } else if (item.isDirectory) {
+          // Skip node_modules and .git
+          if (item.name === 'node_modules' || item.name === '.git' || item.name === '.venv' || item.name === '__pycache__') {
+            return [];
+          }
+
+          const dirReader = item.createReader();
+          const entries: any[] = [];
+
+          const readEntries = async () => {
+            const result = await new Promise<any[]>((resolve) => {
+              dirReader.readEntries((res: any[]) => resolve(res));
+            });
+
+            if (result.length > 0) {
+              entries.push(...result);
+              await readEntries(); // Continue reading (Chrome limit is 100)
+            }
+          };
+
+          await readEntries();
+
+          const results = await Promise.all(
+            entries.map(entry => scanFiles(entry, path + item.name + '/'))
+          );
+
+          return results.flat();
+        }
+        return [];
+      };
+
       const allFiles: { file: File, path: string }[] = [];
       let rootFolderName = "Uploaded Content";
 
@@ -318,7 +318,7 @@ export default function FileDropZone({ onFilesSelected, acceptedTypes, disabled 
               Drag & Drop Project Folder
             </h5>
             <p className="text-xs text-textSecondary mb-4 max-w-sm mx-auto">
-              We'll upload and analyze your code securely.
+              We&apos;ll upload and analyze your code securely.
               <br />
               <span className="text-textMuted">(Binaries & node_modules are automatically skipped)</span>
             </p>

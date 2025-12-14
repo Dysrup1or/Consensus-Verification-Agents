@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { CVAWebSocket, ConnectionStatus } from '@/lib/ws';
-import { startRun, fetchVerdict, fetchRuns, fetchStatus, fetchPrompt } from '@/lib/api';
+import { startRun, fetchVerdict, fetchRuns, fetchStatus, fetchPrompt, fetchVerdictsPayload, cancelRun } from '@/lib/api';
 import {
   PipelineStatus,
   ConsensusResult,
@@ -12,6 +12,7 @@ import {
   WSVerdictData,
   RunListItem,
   PromptRecommendation as PromptData,
+  RunTelemetry,
 } from '@/lib/types';
 import StatusBadge from '@/components/StatusBadge';
 import Verdict from '@/components/Verdict';
@@ -20,6 +21,8 @@ import Toast from '@/components/Toast';
 import FileDropZone from '@/components/FileDropZone';
 import ConstitutionInput from '@/components/ConstitutionInput';
 import PromptRecommendation from '@/components/PromptRecommendation';
+import RunDiagnostics from '@/components/RunDiagnostics';
+import CoverageNotesStrip from '@/components/CoverageNotesStrip';
 import { 
   Activity, 
   Shield, 
@@ -45,6 +48,9 @@ export default function Dashboard() {
   
   // NEW: Prompt recommendation for AI-assisted fixing
   const [promptData, setPromptData] = useState<PromptData | null>(null);
+
+  // Phase 6: diagnostics telemetry (best-effort)
+  const [diagnosticsTelemetry, setDiagnosticsTelemetry] = useState<RunTelemetry | null>(null);
   
   // Inputs
   const [targetPath, setTargetPath] = useState<string>('');
@@ -60,6 +66,20 @@ export default function Dashboard() {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   
   const wsRef = useRef<CVAWebSocket | null>(null);
+
+  const fetchDiagnostics = useCallback(async (runId: string) => {
+    try {
+      const payload = await fetchVerdictsPayload(runId);
+      const telemetry = payload?.telemetry ?? null;
+      if (!telemetry || typeof telemetry !== 'object') {
+        setDiagnosticsTelemetry(null);
+        return;
+      }
+      setDiagnosticsTelemetry(telemetry as RunTelemetry);
+    } catch {
+      setDiagnosticsTelemetry(null);
+    }
+  }, []);
 
   // Download helper function
   const downloadFile = (content: string, filename: string, mimeType: string = 'text/plain') => {
@@ -107,8 +127,6 @@ export default function Dashboard() {
 
   // Handle WS messages
   const handleWsMessage = useCallback((msg: WSMessage) => {
-    console.log('WS Message:', msg);
-    
     if (msg.type === 'status' || msg.type === 'progress') {
       const data = msg.data as WSProgressData;
       setStatus(data.status);
@@ -131,6 +149,9 @@ export default function Dashboard() {
               // NEW: Store raw content for downloads
               setReportMarkdown(resp.report_markdown || null);
               setPatchDiff(resp.patch_diff || null);
+
+              // Phase 6 diagnostics (best-effort)
+              fetchDiagnostics(currentRunId);
               
               // Fetch prompt recommendation if verification failed
               if (resp.consensus.overall_status !== 'pass') {
@@ -164,19 +185,36 @@ export default function Dashboard() {
     }
   }, [currentRunId]);
 
+  const handleCancelRun = async () => {
+    if (!currentRunId) return;
+    try {
+      await cancelRun(currentRunId);
+      wsRef.current?.stop();
+      setWsStatus('disconnected');
+      setStatus('idle');
+      setProgress(0);
+      setMessage('Run cancelled');
+      setConsensus(null);
+      setPatches(null);
+      setReportMarkdown(null);
+      setPatchDiff(null);
+      setPromptData(null);
+      setDiagnosticsTelemetry(null);
+      setToastMsg('Cancelled run');
+    } catch (e: any) {
+      setToastMsg(`Failed to cancel: ${e.message}`);
+    }
+  };
+
   // Handle file selection
   const handleFilesSelected = (files: FileList | null, path?: string) => {
-    console.log('🎯🎯🎯 [page.tsx] handleFilesSelected CALLED:', { files: files?.length, path });
     if (path) {
-      console.log('📁 [page.tsx] Setting targetPath to:', path);
       setTargetPath(path);
-      console.log('✅ [page.tsx] setTargetPath called with:', path);
     } else if (files && files.length > 0) {
       const pathStr = `[${files.length} files selected]`;
-      console.log('📄 [page.tsx] Setting targetPath to:', pathStr);
       setTargetPath(pathStr);
     } else {
-      console.warn('⚠️ [page.tsx] handleFilesSelected called but no path and no files!');
+      // no-op
     }
   };
 
@@ -227,33 +265,26 @@ export default function Dashboard() {
 
   // Start verification
   const handleStartRun = async () => {
-    console.log('🔴 BUTTON CLICKED - handleStartRun triggered');
-    console.log('📊 Current state:', { targetPath, constitution: constitution.substring(0, 50), status });
-    
     // Validate the path
     const validation = validateTargetPath(targetPath);
     if (!validation.valid) {
-      console.log('⚠️ Path validation failed:', validation.error);
       setToastMsg(validation.error || 'Invalid path');
       return;
     }
 
     try {
-      console.log('🔄 Setting status to scanning...');
       setStatus('scanning');
       setProgress(0);
       setMessage('Starting verification...');
       setConsensus(null);
       setPatches(null);
       setPromptData(null);
+      setDiagnosticsTelemetry(null);
       
       const pathToUse = validation.resolvedPath!;
       // Pass constitution text if user provided any rules
       const specContent = constitution.trim() || undefined;
-      
-      console.log('📤 Calling startRun API with validated path...', { pathToUse, specContent });
       const resp = await startRun(pathToUse, specContent);
-      console.log('✅ startRun returned:', resp);
       
       setCurrentRunId(resp.run_id);
       setToastMsg(`Verification started`);
@@ -271,7 +302,6 @@ export default function Dashboard() {
       const runsData = await fetchRuns();
       setRuns(runsData.runs);
     } catch (e: any) {
-      console.error('💥 handleStartRun error:', e);
       setStatus('error');
       setMessage(e.message);
       setToastMsg(`Failed: ${e.message}`);
@@ -289,6 +319,8 @@ export default function Dashboard() {
         // NEW: Store raw content for downloads
         setReportMarkdown(resp.report_markdown || null);
         setPatchDiff(resp.patch_diff || null);
+        // Phase 6 diagnostics (best-effort)
+        fetchDiagnostics(runId);
         setStatus('complete');
         setProgress(100);
         setMessage(`Loaded run ${runId}`);
@@ -315,6 +347,21 @@ export default function Dashboard() {
       setToastMsg(`Failed to load: ${e.message}`);
     }
   };
+
+  // Deep link support: /?run=<run_id>
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const runId = new URLSearchParams(window.location.search).get('run');
+    if (!runId) return;
+
+    // Avoid re-loading if already on this run.
+    if (currentRunId === runId) return;
+
+    // Fire and forget; errors surface via toast.
+    handleLoadRun(runId);
+    // Intentionally *not* depending on handleLoadRun to avoid recreating effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRunId]);
 
   useEffect(() => {
     return () => wsRef.current?.stop();
@@ -387,14 +434,10 @@ export default function Dashboard() {
     if (!currentRunId || !isRunning) return;
     if (wsStatus === 'connected') return; // WS is working, no need to poll
 
-    console.log('📡 Starting HTTP polling fallback (WS disconnected)');
-    
     const pollInterval = setInterval(async () => {
       try {
         const statusResp = await fetchStatus(currentRunId);
         const state = statusResp.state;
-        
-        console.log('📡 Poll result:', state.status, state.progress_percent + '%');
         
         setProgress(state.progress_percent);
         setMessage(state.message);
@@ -412,6 +455,9 @@ export default function Dashboard() {
               // NEW: Store raw content for downloads
               setReportMarkdown(verdictResp.report_markdown || null);
               setPatchDiff(verdictResp.patch_diff || null);
+
+              // Phase 6 diagnostics (best-effort)
+              fetchDiagnostics(currentRunId);
               
               // Fetch prompt recommendation if verification failed
               if (verdictResp.consensus.overall_status !== 'pass') {
@@ -462,8 +508,8 @@ export default function Dashboard() {
                 <Shield className="w-6 h-6 text-primary" />
               </div>
               <div>
-                <h1 className="text-xl font-bold tracking-tight">Consensus Verifier</h1>
-                <p className="text-xs text-textMuted">AI-Powered Code Analysis</p>
+                <h1 className="text-xl font-bold tracking-tight">Invariant</h1>
+                <p className="text-xs text-textMuted">Invariant • Verification Coach</p>
               </div>
             </div>
             
@@ -611,6 +657,14 @@ export default function Dashboard() {
               <div className="flex items-center gap-2 mb-2">
                 <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
                 <span className="text-sm font-medium text-primary">{getStageLabel(status)}</span>
+                {currentRunId && (
+                  <button
+                    onClick={handleCancelRun}
+                    className="ml-auto px-3 py-1.5 rounded-lg border border-border bg-surface text-textPrimary text-xs hover:border-primary/50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                )}
               </div>
             )}
             <p className="text-sm text-textSecondary">{message}</p>
@@ -696,6 +750,12 @@ export default function Dashboard() {
                 </p>
               </div>
             </div>
+
+            {/* Phase 6: Coverage Notes + Diagnostics */}
+            {diagnosticsTelemetry?.coverage && (
+              <CoverageNotesStrip coverage={diagnosticsTelemetry.coverage} />
+            )}
+            <RunDiagnostics telemetry={diagnosticsTelemetry} />
             
             <div>
               <h3 className="text-lg font-semibold mb-4">Judge Verdicts</h3>
@@ -735,7 +795,7 @@ export default function Dashboard() {
             <div className="p-6 rounded-xl bg-gradient-to-r from-primary/10 to-accent/10 border border-primary/20">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-lg font-semibold mb-1">What's Next?</h3>
+                  <h3 className="text-lg font-semibold mb-1">What&apos;s Next?</h3>
                   <p className="text-sm text-textSecondary">
                     {consensus.overall_status === 'pass' 
                       ? 'Your code passed verification! Consider adding more requirements or testing different scenarios.'
@@ -781,19 +841,6 @@ export default function Dashboard() {
       </div>
 
       <Toast message={toastMsg} onDismiss={() => setToastMsg(null)} />
-      
-      {/* DEBUG PANEL - Remove in production */}
-      <div className="fixed bottom-4 right-4 p-4 bg-black/90 text-green-400 font-mono text-xs rounded-lg border border-green-500/50 max-w-sm z-[9999] shadow-lg">
-        <div className="font-bold text-green-300 mb-2">🔧 DEBUG PANEL</div>
-        <div><span className="text-gray-400">status:</span> {status}</div>
-        <div><span className="text-gray-400">progress:</span> {progress.toFixed(1)}% (synthetic: {syntheticProgress.toFixed(1)}%)</div>
-        <div><span className="text-gray-400">isRunning:</span> {isRunning ? '✅ YES' : '❌ NO'}</div>
-        <div><span className="text-gray-400">targetPath:</span> {targetPath || '(empty)'}</div>
-        <div><span className="text-gray-400">canStart:</span> {canStart ? '✅ YES' : '❌ NO'}</div>
-        <div><span className="text-gray-400">wsStatus:</span> {wsStatus}</div>
-        <div><span className="text-gray-400">consensus:</span> {consensus ? '✅ LOADED' : '❌ NULL'}</div>
-        <div><span className="text-gray-400">currentRunId:</span> {currentRunId || '(none)'}</div>
-      </div>
     </main>
   );
 }

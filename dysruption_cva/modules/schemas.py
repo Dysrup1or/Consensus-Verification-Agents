@@ -247,6 +247,91 @@ else:
 
 
 # =============================================================================
+# TRIBUNAL TELEMETRY (Phase 0)
+# =============================================================================
+
+
+class TelemetryCoverage(BaseModel):
+    included_files_count: int = Field(..., ge=0)
+    header_covered_count: int = Field(..., ge=0)
+    full_text_covered_count: int = Field(..., ge=0)
+    slice_covered_count: int = Field(..., ge=0)
+    truncated_files: List[str] = Field(default_factory=list)
+    unknown_files: List[str] = Field(default_factory=list)
+
+    changed_files_total: int = Field(..., ge=0)
+    changed_files_fully_covered_count: int = Field(..., ge=0)
+    changed_files_header_covered_count: int = Field(..., ge=0)
+    changed_files_unknown_count: int = Field(..., ge=0)
+    fully_covered_percent_of_changed: float = Field(..., ge=0.0, le=100.0)
+
+    # Phase 2: explicit forced-file mechanism (rollup).
+    forced_files_count: int = Field(default=0, ge=0)
+
+    # Explicit mapping of skipped/not-fully-covered reasons.
+    # Keys should be repo-relative paths; values are reason codes.
+    skip_reasons: Dict[str, str] = Field(default_factory=dict)
+
+
+class TelemetryCost(BaseModel):
+    lane1_deterministic_tokens: int = Field(..., ge=0)
+    lane2_llm_input_tokens_est: int = Field(..., ge=0)
+    lane2_llm_stable_prefix_tokens_est: int = Field(..., ge=0)
+    lane2_llm_variable_suffix_tokens_est: int = Field(..., ge=0)
+
+
+class TelemetryCache(BaseModel):
+    cached_vs_uncached: str = Field(..., description="unknown|cached|uncached")
+    reason: Optional[str] = None
+    # Phase 5: provider cost primitives (best-effort; may remain unknown).
+    intent: Optional[str] = Field(default=None, description="e.g. stable_prefix_split")
+    provider_cache_signal: Optional[str] = Field(default=None, description="provider-reported cache signal if available")
+
+
+class TelemetryLatency(BaseModel):
+    run_started_at: str
+    run_final_at: str
+    ttff_ms: int = Field(..., ge=0)
+    time_to_final_ms: int = Field(..., ge=0)
+    # Optional sub-step timings (best-effort)
+    diff_detection_ms: Optional[int] = Field(default=None, ge=0)
+    import_resolution_ms: Optional[int] = Field(default=None, ge=0)
+    context_build_ms: Optional[int] = Field(default=None, ge=0)
+    llm_latency_ms: Optional[int] = Field(default=None, ge=0)
+
+    # Phase 5: batch primitive rollups (lane2). Optional because most runs are single-call.
+    lane2_llm_batch_size: Optional[int] = Field(default=None, ge=0)
+    lane2_llm_batch_mode: Optional[str] = Field(default=None, description="single|concurrent|provider_batch|sequential")
+    lane2_llm_per_item_latency_ms: Optional[List[int]] = Field(default=None)
+
+
+class TelemetrySkipped(BaseModel):
+    skipped_imports: List[str] = Field(default_factory=list)
+
+
+class TelemetryRouter(BaseModel):
+    lane_requested: str
+    lane_used: str
+    provider: str
+    model: str
+    reason: str
+    fallback_chain: List[Dict[str, str]] = Field(default_factory=list)
+
+
+class RunTelemetry(BaseModel):
+    run_id: str
+    project_id: str
+    mode: str
+    coverage: TelemetryCoverage
+    cost: TelemetryCost
+    cache: TelemetryCache
+    latency: TelemetryLatency
+    skipped: TelemetrySkipped
+    router: Optional[TelemetryRouter] = None
+    error: Optional[str] = None
+
+
+# =============================================================================
 # FILE TREE MODELS
 # =============================================================================
 

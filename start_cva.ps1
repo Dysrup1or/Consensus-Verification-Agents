@@ -64,7 +64,7 @@ else {
 # START BACKEND
 # ============================================================
 if (-not $FrontendOnly) {
-    Write-Host "[3/4] Starting Backend (FastAPI on :8000)..." -ForegroundColor Yellow
+    Write-Host "[3/4] Starting Backend (FastAPI on :8001)..." -ForegroundColor Yellow
     
     $backendCmd = "cd '$ScriptDir\dysruption_cva'; Write-Host 'CVA Backend Starting...' -ForegroundColor Cyan; uvicorn modules.api:app --reload --port 8001 --host 0.0.0.0 --timeout-keep-alive 300"
     Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd

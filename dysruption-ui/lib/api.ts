@@ -5,12 +5,12 @@ import {
   RunListResponse,
   Invariant,
   PromptResponse,
+  VerdictsPayload,
 } from './types';
 
-// DEFAULT TO 8001 - Backend runs on 8001!
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-
-const isDev = process.env.NODE_ENV === 'development';
+// Always go through the Next.js server proxy. This keeps secrets (CVA_API_TOKEN)
+// on the server and allows OAuth-gated access in production.
+const API_BASE = '/api/cva';
 
 /**
  * Start a new verification run.
@@ -41,7 +41,7 @@ export async function startRun(targetDir: string, specContent?: string, specPath
   } catch (error: any) {
     // Show alert for network errors (only in browser)
     if (typeof window !== 'undefined') {
-      alert(`Backend connection failed: ${error.message}\n\nIs the backend running on ${API_BASE}?`);
+      alert(`Backend connection failed: ${error.message}`);
     }
     throw error;
   }
@@ -100,6 +100,25 @@ export async function fetchRuns(): Promise<RunListResponse> {
     throw new Error('Failed to fetch runs');
   }
   return res.json();
+}
+
+/**
+ * Fetch the tribunal verdict payload (including telemetry) for a run.
+ *
+ * This is best-effort UI diagnostics: it should never crash the dashboard.
+ */
+export async function fetchVerdictsPayload(runId: string): Promise<VerdictsPayload> {
+  try {
+    const res = await fetch(`${API_BASE}/api/verdicts/${runId}`);
+    if (!res.ok) {
+      return {};
+    }
+    const data = await res.json();
+    if (!data || typeof data !== 'object') return {};
+    return data as VerdictsPayload;
+  } catch {
+    return {};
+  }
 }
 
 /**

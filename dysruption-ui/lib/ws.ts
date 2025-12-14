@@ -6,6 +6,7 @@ type MessageHandler = (event: WSMessage) => void;
 type StatusHandler = (status: ConnectionStatus, detail?: string) => void;
 
 const isDev = process.env.NODE_ENV === 'development';
+const isProd = process.env.NODE_ENV === 'production';
 
 /**
  * WebSocket client for CVA real-time updates.
@@ -47,6 +48,15 @@ export class CVAWebSocket {
    * Start WebSocket connection for a specific run.
    */
   start(runId: string) {
+    // In production we route API calls through authenticated server-side proxies.
+    // Browser WebSockets cannot set auth headers, and we do not want to expose
+    // backend tokens in query params. Use polling fallback instead.
+    if (isProd) {
+      this.runId = runId;
+      this.shouldReconnect = false;
+      this.notifyStatus('disconnected', 'disabled_in_production');
+      return;
+    }
     this.runId = runId;
     this.shouldReconnect = true;
     this.reconnectAttempts = 0;

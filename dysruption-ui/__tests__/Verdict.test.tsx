@@ -66,6 +66,7 @@ describe('Verdict Component', () => {
     render(<Verdict verdicts={mockVerdicts} vetoTriggered={true} />);
     const vetoCard = screen.getByTestId('veto');
     expect(vetoCard).toHaveClass('motion-safe:animate-pulse');
-    expect(vetoCard).toHaveClass('border-danger');
+    expect(vetoCard).toHaveClass('border-danger/50');
+    expect(vetoCard).toHaveClass('text-danger');
   });
 });

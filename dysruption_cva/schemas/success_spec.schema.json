@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dysruption.ai/schemas/success_spec.schema.json",
+  "title": "SuccessSpec",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "acceptance_criteria": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": []
+    },
+    "notes": { "type": "string" }
+  },
+  "required": ["acceptance_criteria"]
+}

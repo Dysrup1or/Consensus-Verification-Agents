@@ -110,7 +110,7 @@ python cva.py --git https://github.com/user/repo
 
 ```bash
 # Start the API server
-uvicorn modules.api:app --host 0.0.0.0 --port 8000 --reload
+uvicorn modules.api:app --host 0.0.0.0 --port 8001 --reload
 
 # Or run directly
 python -m modules.api
@@ -131,7 +131,7 @@ python -m modules.api
 Connect to `/ws/{run_id}` for real-time status streaming:
 
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/ws/abc123');
+const ws = new WebSocket('ws://localhost:8001/ws/abc123');
 
 ws.onmessage = (event) => {
     const data = JSON.parse(event.data);
@@ -144,21 +144,25 @@ ws.onmessage = (event) => {
 
 ```bash
 # Start verification
-curl -X POST http://localhost:8000/run \
+curl -X POST http://localhost:8001/run \
   -H "Content-Type: application/json" \
   -d '{"target_dir": "./my_project", "generate_patches": true}'
 
 # Response: {"run_id": "abc123", "status": "scanning", "message": "..."}
 
 # Check status
-curl http://localhost:8000/status/abc123
+curl http://localhost:8001/status/abc123
 
 # Get verdict (when complete)
-curl http://localhost:8000/verdict/abc123
+curl http://localhost:8001/verdict/abc123
 ```
 
-When running with `CVA_PRODUCTION=true`, `/upload` and `/run` require an auth token.
+When running with `CVA_PRODUCTION=true`, the API is locked down behind an auth token.
+At minimum, all run-control and run-data endpoints require the token: `/upload`, `/run`, `/status/{run_id}`, `/verdict/{run_id}`, `/prompt/{run_id}`, `/runs`, and `/run/{run_id}` (cancel).
 Provide it as either `Authorization: Bearer <token>` or `X-API-Token: <token>`.
+
+In production, the WebSocket endpoint requires a token via query param (browser WebSocket APIs cannot set auth headers):
+`ws://localhost:8001/ws/<run_id>?token=<token>`
 
 ### Options
 

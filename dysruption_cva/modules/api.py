@@ -71,6 +71,7 @@ from .schemas import (
     VerdictResponse,
     VerdictStatus,
     WebSocketMessage,
+    RunTelemetry,
 )
 from .parser import ConstitutionParser, run_extraction
 from .tribunal import Tribunal, TribunalVerdict, Verdict
@@ -84,6 +85,13 @@ from .file_manager import (
     resolve_imports,
 )
 from .judge_engine import default_min_constitution, judge_engine
+from .coverage_store import get_coverage_map, upsert_coverage
+from .router import RouterError, RouterRequest, load_router_config_from_env
+from .router import route as route_llm
+from .self_heal import SelfHealError
+from .self_heal import config_from_env as self_heal_config_from_env
+from .self_heal import default_verify_command_from_env
+from .self_heal import run_self_heal_patch_loop
 
 # =============================================================================
 # APP INITIALIZATION
@@ -436,6 +444,7 @@ class RunState:
         self.verdict: Optional[TribunalVerdict] = None
         self.patches: Optional[PatchSet] = None
         self.error: Optional[str] = None
+        self.cancel_requested: bool = False
         # New fields for prompt synthesis
         self.spec_summary: Optional[str] = None
         self.file_tree: Optional[Dict[str, str]] = None
@@ -446,6 +455,9 @@ class RunState:
         self.report_path: Optional[str] = None
         self.verdict_path: Optional[str] = None
         self.criteria_path: Optional[str] = None
+
+    def request_cancel(self) -> None:
+        self.cancel_requested = True
 
 
 # Global state stores
@@ -544,6 +556,32 @@ async def run_verification_pipeline(run_id: str) -> None:
     # Use derived config for all modules (parser/tribunal/watcher) so outputs are isolated per-run.
     config.config_path = str(effective_config_path)
 
+    class _RunCancelled(Exception):
+        pass
+
+    async def _cancel_if_requested(context: str) -> None:
+        if not run_state.cancel_requested:
+            return
+
+        run_state.state.status = PipelineStatus.ERROR
+        run_state.state.current_phase = "cancelled"
+        run_state.state.message = "Cancelled by user"
+        run_state.state.error = "Cancelled by user"
+        run_state.error = "Cancelled by user"
+
+        # Persist run state for history views.
+        save_run_history(run_state)
+
+        await ws_manager.broadcast(
+            run_id,
+            WebSocketMessage(
+                type="error",
+                run_id=run_id,
+                data={"error": "Cancelled by user", "cancelled": True, "context": context},
+            ),
+        )
+        raise _RunCancelled()
+
     async def update_progress(
         status: PipelineStatus,
         phase: str,
@@ -551,6 +589,7 @@ async def run_verification_pipeline(run_id: str) -> None:
         message: str,
     ) -> None:
         """Update run state and broadcast to WebSockets."""
+        await _cancel_if_requested(f"update_progress:{phase}")
         run_state.state.status = status
         run_state.state.current_phase = phase
         run_state.state.progress_percent = progress
@@ -571,6 +610,7 @@ async def run_verification_pipeline(run_id: str) -> None:
 
     try:
         # Phase 1: Scanning
+        await _cancel_if_requested("before_scanning")
         await update_progress(
             PipelineStatus.SCANNING, "scanning", 10.0, "Scanning project directory..."
         )
@@ -585,6 +625,8 @@ async def run_verification_pipeline(run_id: str) -> None:
         logger.info(f"🔴🔴🔴 [TRACE-4] Watcher target_path after setup: '{watcher.target_path}'")
         
         file_tree = watcher.run_once()
+
+        await _cancel_if_requested("after_scanning")
         
         # 🔍 DIAGNOSTIC: Log file tree details
         logger.info(f"🔴🔴🔴 [TRACE-5] FileTree has {len(file_tree.files)} files")
@@ -611,6 +653,7 @@ async def run_verification_pipeline(run_id: str) -> None:
         )
 
         # Phase 2: Parsing
+        await _cancel_if_requested("before_parsing")
         await update_progress(
             PipelineStatus.PARSING, "parsing", 30.0, "Extracting invariants from spec..."
         )
@@ -632,6 +675,8 @@ async def run_verification_pipeline(run_id: str) -> None:
         invariants = parser.clarify_if_needed(invariants, spec_content)
         parser.save_criteria(invariants)
 
+        await _cancel_if_requested("after_parsing")
+
         total_invariants = sum(len(invariants[cat]) for cat in invariants)
         await update_progress(
             PipelineStatus.PARSING,
@@ -641,6 +686,7 @@ async def run_verification_pipeline(run_id: str) -> None:
         )
 
         # Phase 3: Static Analysis
+        await _cancel_if_requested("before_static_analysis")
         await update_progress(
             PipelineStatus.STATIC_ANALYSIS,
             "static_analysis",
@@ -661,6 +707,8 @@ async def run_verification_pipeline(run_id: str) -> None:
                 executor,
                 lambda: tribunal.run_static_analysis(file_tree_dict, watcher.detect_primary_language())
             )
+
+        await _cancel_if_requested("after_static_analysis")
 
         if should_abort:
             await update_progress(
@@ -702,6 +750,7 @@ async def run_verification_pipeline(run_id: str) -> None:
         )
 
         # Phase 4: Judging
+        await _cancel_if_requested("before_judging")
         await update_progress(
             PipelineStatus.JUDGING,
             "judging",
@@ -719,6 +768,8 @@ async def run_verification_pipeline(run_id: str) -> None:
         )
         run_state.verdict = verdict
 
+        await _cancel_if_requested("after_judging")
+
         await update_progress(
             PipelineStatus.JUDGING,
             "judging",
@@ -729,6 +780,7 @@ async def run_verification_pipeline(run_id: str) -> None:
         )
 
         # Phase 5: Patching (if failed and patches requested)
+        await _cancel_if_requested("before_patching")
         if (
             config.generate_patches
             and verdict.overall_verdict != Verdict.PASS
@@ -747,6 +799,35 @@ async def run_verification_pipeline(run_id: str) -> None:
                 total_issues_addressed=len(verdict.remediation_suggestions),
                 generation_timestamp=datetime.now(),
             )
+
+        # Phase 4: Optional self-healing patch loop (strict opt-in; disabled by default).
+        # NOTE: This only runs when patches are present AND CVA_SELF_HEAL_ENABLED=true.
+        try:
+            sh_cfg = self_heal_config_from_env()
+            sh_verify = default_verify_command_from_env()
+            if (
+                sh_cfg.enabled
+                and sh_verify
+                and run_state.patches
+                and run_state.patches.patches
+                and run_state.artifacts_dir
+            ):
+
+                def provider(i: int):
+                    return run_state.patches if i == 1 else None
+
+                run_self_heal_patch_loop(
+                    project_root=Path(config.target_dir),
+                    run_id=run_id,
+                    artifacts_root=RUN_ARTIFACTS_ROOT,
+                    patch_provider=provider,
+                    verify_command=sh_verify,
+                    config=sh_cfg,
+                )
+        except SelfHealError as e:
+            logger.warning(f"Self-heal patch loop skipped/failed: {e}")
+        except Exception as e:
+            logger.warning(f"Self-heal patch loop unexpected error: {e}")
 
         # Save outputs
         report_path, verdict_path = tribunal.save_outputs(verdict)
@@ -783,6 +864,8 @@ async def run_verification_pipeline(run_id: str) -> None:
         )
         await ws_manager.broadcast(run_id, ws_message)
 
+    except _RunCancelled:
+        return
     except Exception as e:
         logger.error(f"Pipeline error for run {run_id}: {e}")
         run_state.state.status = PipelineStatus.ERROR
@@ -827,7 +910,7 @@ async def root() -> Dict[str, Any]:
 
     # 1. File System Check
     try:
-        test_file = Path(os.getcwd()) / "temp_uploads" / ".healthcheck"
+        test_file = UPLOAD_ROOT / ".healthcheck"
         test_file.parent.mkdir(parents=True, exist_ok=True)
         test_file.write_text("ok")
         test_file.unlink()
@@ -919,8 +1002,9 @@ async def post_intent(payload: IntentEnvelope, request: Request) -> Dict[str, An
 
 
 @app.get("/api/intent/{run_id}")
-async def get_intent(run_id: str) -> Dict[str, Any]:
+async def get_intent(run_id: str, request: Request) -> Dict[str, Any]:
     """Retrieve stored intent for a run_id."""
+    _require_api_token(request)
     stored = await _intent_store.get(run_id)
     if not stored:
         raise HTTPException(status_code=404, detail="Intent not found or expired")
@@ -956,6 +1040,13 @@ def _verdicts_url_for_run(run_id: str) -> str:
 async def _run_tribunal_scan(run_id: str, mode: str) -> None:
     """Background scan job: diff/full detection -> import resolution -> token-budget context -> judge -> persist -> webhook."""
 
+    def _est_tokens(text: str) -> int:
+        # Deterministic heuristic: ~4 chars per token.
+        return max(0, (len(text or "") + 3) // 4)
+
+    scan_started_at = datetime.now().isoformat()
+    t0 = time.time()
+
     stored_intent = await _intent_store.get(run_id)
     if not stored_intent:
         await _tribunal_run_store.set(run_id, {"status": "failed", "error_details": "Intent missing/expired"}, ttl_seconds=3600)
@@ -984,6 +1075,7 @@ async def _run_tribunal_scan(run_id: str, mode: str) -> None:
         # Resolve imports (best-effort)
         skipped_imports: List[str] = []
         import_files: List[str] = []
+        imp_start = time.time()
         try:
             imp_res = resolve_imports(project_root, diff_result.changed_files, depth=2)
             import_files = imp_res.resolved_files
@@ -991,41 +1083,76 @@ async def _run_tribunal_scan(run_id: str, mode: str) -> None:
         except Exception as e:
             skipped_imports = [f"import_resolution_error:{e}"]
             import_files = []
+        import_ms = int((time.time() - imp_start) * 1000)
 
-        # Build token-budgeted context (changed > imports > constitution)
-        ctx = build_llm_context(
-            project_root,
-            changed_files=diff_result.changed_files,
-            import_files=import_files,
-            constitution_text=constitution_text,
-            token_budget=TRIBUNAL_TOKEN_BUDGET,
-        )
-
-        # Read included files into a deterministic mapping for rule checks and LLM context
-        file_texts: Dict[str, str] = {}
-        for rel in (ctx.included_changed_files + ctx.included_import_files):
+        # Deterministic lane should not be budget-limited: read ALL changed+import files (bounded per file)
+        all_file_texts: Dict[str, str] = {}
+        for rel in (diff_result.changed_files + import_files):
             try:
                 abs_path = (project_root / rel).resolve()
                 if not abs_path.exists() or not abs_path.is_file():
                     continue
-                # Read with an upper bound
                 raw = abs_path.read_bytes()
                 if len(raw) > 512 * 1024:
                     raw = raw[:512 * 1024]
-                file_texts[rel] = raw.decode("utf-8", errors="replace")
+                all_file_texts[rel] = raw.decode("utf-8", errors="replace")
             except Exception:
                 continue
+
+        # Coverage-aware, risk-prioritized packing for model-assisted checks.
+        # Use a simple SQLite coverage log to boost previously-uncovered changed files.
+        coverage_db_path = (RUN_ARTIFACTS_ROOT / "coverage.db").resolve()
+        prior = get_coverage_map(coverage_db_path, project_id)
+        uncovered_changed = [p for p in diff_result.changed_files if p not in prior]
+
+        ctx_start = time.time()
+        ctx = build_llm_context(
+            project_root,
+            changed_files=diff_result.changed_files,
+            import_files=import_files,
+            forced_files=uncovered_changed,
+            constitution_text=constitution_text,
+            token_budget=TRIBUNAL_TOKEN_BUDGET,
+        )
+        ctx_ms = int((time.time() - ctx_start) * 1000)
+
+        # LLM context uses the budgeted snippets directly (supports header/slice coverage).
+        llm_file_texts: Dict[str, str] = {}
+        # Keep order stable: constitution, manifest, then files as added.
+        for key in ["__constitution__", "__manifest__"]:
+            if key in ctx.file_snippets:
+                llm_file_texts[key] = ctx.file_snippets[key]
+        for rel in (ctx.included_changed_files + ctx.included_import_files):
+            if rel in ctx.file_snippets:
+                llm_file_texts[rel] = ctx.file_snippets[rel]
+
+        # Phase 3: route Lane 2 (local/open) → Lane 3 (frontier) if needed.
+        # This selects the model string used for the LLM checks.
+        router_decision = None
+        llm_model_to_use = TRIBUNAL_INTENT_LLM_MODEL
+        try:
+            router_cfg = load_router_config_from_env(legacy_model=TRIBUNAL_INTENT_LLM_MODEL)
+            allow_escalation = os.getenv("CVA_ALLOW_LANE3_ESCALATION", "true").lower() == "true"
+            router_decision = await route_llm(
+                request=RouterRequest(lane="lane2", token_budget=TRIBUNAL_TOKEN_BUDGET, allow_escalation=allow_escalation),
+                lane2_candidates=router_cfg.get("lane2", []),
+                lane3_candidates=router_cfg.get("lane3", []),
+            )
+            llm_model_to_use = router_decision.model
+        except RouterError as e:
+            raise RuntimeError(f"RouterError: {e}")
 
         # Judge
         try:
             output = await judge_engine(
-                file_texts=file_texts,
+                file_texts=llm_file_texts,
+                file_texts_for_deterministic=all_file_texts,
                 constitution_text=constitution_text,
                 skipped_imports=skipped_imports,
                 token_count=ctx.token_count,
                 token_budget_partial=ctx.partial,
                 success_spec=intent.success_spec.model_dump(),
-                llm_model=TRIBUNAL_INTENT_LLM_MODEL,
+                llm_model=llm_model_to_use,
                 llm_timeout_seconds=TRIBUNAL_LLM_TIMEOUT_SECONDS,
                 llm_enabled=True,
             )
@@ -1037,6 +1164,105 @@ async def _run_tribunal_scan(run_id: str, mode: str) -> None:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         verdicts_path = run_dir / "tribunal_verdicts.json"
+        # Update coverage DB for files included in model-assisted checks.
+        try:
+            upsert_coverage(
+                coverage_db_path,
+                project_id=project_id,
+                run_id=run_id,
+                rel_paths=[p for p in (ctx.included_changed_files + ctx.included_import_files) if p and not p.startswith("__")],
+                coverage_kind="mixed",
+            )
+        except Exception:
+            pass
+
+        # Phase 0 telemetry (no behavior change): persist structured rollups + timing.
+        llm_prompt_text = "\n".join([f"# FILE: {p}\n{t}" for p, t in llm_file_texts.items()])
+        llm_input_tokens_est = _est_tokens(llm_prompt_text)
+        stable_text = "\n".join(
+            [
+                f"# FILE: {k}\n{llm_file_texts.get(k, '')}"
+                for k in ["__constitution__", "__manifest__"]
+                if k in llm_file_texts
+            ]
+        )
+        stable_tokens_est = _est_tokens(stable_text)
+        variable_tokens_est = max(0, llm_input_tokens_est - stable_tokens_est)
+
+        # Coverage rollups
+        header_covered_count = sum(1 for k, v in ctx.coverage_kinds.items() if not str(k).startswith("__") and v == "header")
+        full_text_covered_count = sum(1 for k, v in ctx.coverage_kinds.items() if not str(k).startswith("__") and v == "full")
+        slice_covered_count = sum(1 for k, v in ctx.coverage_kinds.items() if not str(k).startswith("__") and v == "slice")
+        included_files_count = len([k for k in llm_file_texts.keys() if not str(k).startswith("__")])
+
+        candidate_unique = sorted(set((diff_result.changed_files or []) + (import_files or [])))
+        unknown_files = [p for p in candidate_unique if p and (p not in ctx.coverage_kinds) and (p not in ctx.truncated_files)]
+
+        run_final_at = datetime.now().isoformat()
+        total_ms = int((time.time() - t0) * 1000)
+        ttff_ms = int(output.timings.get("ttff_ms", 0) or 0)
+
+        telemetry = RunTelemetry(
+            run_id=run_id,
+            project_id=project_id,
+            mode=mode,
+            coverage={
+                "included_files_count": included_files_count,
+                "header_covered_count": int(header_covered_count),
+                "full_text_covered_count": int(full_text_covered_count),
+                "slice_covered_count": int(slice_covered_count),
+                "truncated_files": [p for p in (ctx.truncated_files or []) if not str(p).startswith("__")],
+                "unknown_files": unknown_files,
+                "changed_files_total": int(ctx.changed_files_total),
+                "changed_files_fully_covered_count": int(ctx.changed_files_fully_covered_count),
+                "changed_files_header_covered_count": int(ctx.changed_files_header_covered_count),
+                "changed_files_unknown_count": int(ctx.changed_files_unknown_count),
+                "fully_covered_percent_of_changed": float(ctx.fully_covered_percent_of_changed),
+                "forced_files_count": int(len(uncovered_changed or [])),
+                "skip_reasons": ctx.skip_reasons or {},
+            },
+            cost={
+                "lane1_deterministic_tokens": 0,
+                "lane2_llm_input_tokens_est": int(llm_input_tokens_est),
+                "lane2_llm_stable_prefix_tokens_est": int(stable_tokens_est),
+                "lane2_llm_variable_suffix_tokens_est": int(variable_tokens_est),
+            },
+            cache={
+                "cached_vs_uncached": "unknown",
+                "reason": "stable_prefix_split_no_provider_signal",
+                "intent": "stable_prefix_split",
+                "provider_cache_signal": None,
+            },
+            latency={
+                "run_started_at": scan_started_at,
+                "run_final_at": run_final_at,
+                "ttff_ms": int(ttff_ms),
+                "time_to_final_ms": int(total_ms),
+                "diff_detection_ms": int(diff_ms),
+                "import_resolution_ms": int(import_ms),
+                "context_build_ms": int(ctx_ms),
+                "llm_latency_ms": output.metrics.llm_latency_ms,
+                "lane2_llm_batch_size": int(output.llm_batch.get("batch_size", 1) or 1) if getattr(output, "llm_batch", None) else 1,
+                "lane2_llm_batch_mode": str(output.llm_batch.get("mode", "single")) if getattr(output, "llm_batch", None) else "single",
+                "lane2_llm_per_item_latency_ms": list(output.llm_batch.get("per_item_latency_ms", [])) if getattr(output, "llm_batch", None) else None,
+            },
+            skipped={
+                "skipped_imports": output.skipped_imports,
+            },
+            router=(
+                {
+                    "lane_requested": router_decision.lane_requested,
+                    "lane_used": router_decision.lane_used,
+                    "provider": router_decision.provider,
+                    "model": router_decision.model,
+                    "reason": router_decision.reason,
+                    "fallback_chain": router_decision.fallback_chain,
+                }
+                if router_decision
+                else None
+            ),
+        ).model_dump()
+
         verdict_payload: Dict[str, Any] = {
             "run_id": run_id,
             "project_id": project_id,
@@ -1044,6 +1270,25 @@ async def _run_tribunal_scan(run_id: str, mode: str) -> None:
             "constitution": constitution_info.model_dump(),
             "diff_detection": {"detection": diff_result.detection, "changed_files": diff_result.changed_files, "time_ms": diff_ms},
             "token_budget": {"budget": TRIBUNAL_TOKEN_BUDGET, "token_count": output.metrics.token_count, "partial": output.partial, "truncated_files": ctx.truncated_files, "included_constitution": ctx.included_constitution},
+            "coverage_audit": {
+                "forced_uncovered_changed_files": uncovered_changed,
+                "llm_included_files": list(llm_file_texts.keys()),
+                "coverage_kinds": ctx.coverage_kinds,
+                "deterministic_files_scanned": len(all_file_texts),
+            },
+            "routing": (
+                {
+                    "lane_requested": router_decision.lane_requested,
+                    "lane_used": router_decision.lane_used,
+                    "provider": router_decision.provider,
+                    "model": router_decision.model,
+                    "reason": router_decision.reason,
+                    "fallback_chain": router_decision.fallback_chain,
+                }
+                if router_decision
+                else None
+            ),
+            "telemetry": telemetry,
             "skipped_imports": output.skipped_imports,
             "unevaluated_rules": output.unevaluated_rules,
             "metrics": {
@@ -1088,6 +1333,80 @@ async def _run_tribunal_scan(run_id: str, mode: str) -> None:
     except Exception as e:
         error_details = _sanitize_str(str(e), max_len=2000)
         await _tribunal_run_store.set(run_id, {"status": "failed", "error_details": error_details, "mode": mode}, ttl_seconds=3600)
+
+        # Best-effort persist a failure artifact with telemetry for Phase 0.
+        try:
+            run_dir = (RUN_ARTIFACTS_ROOT / run_id).resolve()
+            run_dir.mkdir(parents=True, exist_ok=True)
+            verdicts_path = run_dir / "tribunal_verdicts.json"
+
+            run_final_at = datetime.now().isoformat()
+            total_ms = int((time.time() - t0) * 1000)
+
+            telemetry = RunTelemetry(
+                run_id=run_id,
+                project_id=str(project_id) if "project_id" in locals() else "",
+                mode=mode,
+                coverage={
+                    "included_files_count": 0,
+                    "header_covered_count": 0,
+                    "full_text_covered_count": 0,
+                    "slice_covered_count": 0,
+                    "truncated_files": [],
+                    "unknown_files": [],
+                    "changed_files_total": 0,
+                    "changed_files_fully_covered_count": 0,
+                    "changed_files_header_covered_count": 0,
+                    "changed_files_unknown_count": 0,
+                    "fully_covered_percent_of_changed": 0.0,
+                    "forced_files_count": 0,
+                    "skip_reasons": {},
+                },
+                cost={
+                    "lane1_deterministic_tokens": 0,
+                    "lane2_llm_input_tokens_est": 0,
+                    "lane2_llm_stable_prefix_tokens_est": 0,
+                    "lane2_llm_variable_suffix_tokens_est": 0,
+                },
+                cache={
+                    "cached_vs_uncached": "unknown",
+                    "reason": "stable_prefix_split_no_provider_signal",
+                    "intent": "stable_prefix_split",
+                    "provider_cache_signal": None,
+                },
+                latency={
+                    "run_started_at": scan_started_at,
+                    "run_final_at": run_final_at,
+                    "ttff_ms": 0,
+                    "time_to_final_ms": int(total_ms),
+                    "lane2_llm_batch_size": 0,
+                    "lane2_llm_batch_mode": None,
+                    "lane2_llm_per_item_latency_ms": None,
+                },
+                skipped={
+                    "skipped_imports": [],
+                },
+                error=error_details,
+            ).model_dump()
+
+            verdicts_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "mode": mode,
+                        "status": "failed",
+                        "error_details": error_details,
+                        "telemetry": telemetry,
+                        "created_at": run_final_at,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
         # Best-effort webhook (optional)
         if intent.initiator and intent.initiator.callback_url:
             try:
@@ -1135,7 +1454,8 @@ async def trigger_scan(payload: TriggerScanRequest, request: Request) -> Trigger
 
 
 @app.get("/api/verdicts/{run_id}")
-async def get_verdicts(run_id: str) -> Dict[str, Any]:
+async def get_verdicts(run_id: str, request: Request) -> Dict[str, Any]:
+    _require_api_token(request)
     # Return persisted verdict payload if present
     run_dir = (RUN_ARTIFACTS_ROOT / run_id).resolve()
     verdicts_path = run_dir / "tribunal_verdicts.json"
@@ -1453,25 +1773,27 @@ async def start_run(
 
 
 @app.get("/status/{run_id}", response_model=StatusResponse)
-async def get_status(run_id: str) -> StatusResponse:
+async def get_status(run_id: str, request: Request) -> StatusResponse:
     """
     Get current status of a verification run.
 
     Returns the current phase, progress percentage, and any messages.
     """
+    _require_api_token(request)
     run_state = get_run(run_id)
 
     return StatusResponse(run_id=run_id, state=run_state.state)
 
 
 @app.get("/verdict/{run_id}", response_model=VerdictResponse)
-async def get_verdict(run_id: str) -> VerdictResponse:
+async def get_verdict(run_id: str, request: Request) -> VerdictResponse:
     """
     Get the final verdict of a verification run.
 
     Only available after the run is complete. Returns the consensus result,
     any generated patches, AND the raw report/diff content for frontend download.
     """
+    _require_api_token(request)
     run_state = get_run(run_id)
 
     if run_state.state.status not in (PipelineStatus.COMPLETE, PipelineStatus.ERROR):
@@ -1541,7 +1863,7 @@ async def get_verdict(run_id: str) -> VerdictResponse:
 
 
 @app.get("/prompt/{run_id}")
-async def get_fix_prompt(run_id: str) -> Dict[str, Any]:
+async def get_fix_prompt(run_id: str, request: Request) -> Dict[str, Any]:
     """
     Generate a synthesized fix prompt for a failed verification run.
     
@@ -1550,6 +1872,7 @@ async def get_fix_prompt(run_id: str) -> Dict[str, Any]:
     
     Only available after verification is complete and has issues to fix.
     """
+    _require_api_token(request)
     run_state = get_run(run_id)
 
     if run_state.state.status not in (PipelineStatus.COMPLETE, PipelineStatus.ERROR):
@@ -1667,8 +1990,9 @@ async def get_fix_prompt(run_id: str) -> Dict[str, Any]:
 
 
 @app.delete("/run/{run_id}")
-async def cancel_run(run_id: str) -> Dict[str, Any]:
+async def cancel_run(run_id: str, request: Request) -> Dict[str, Any]:
     """Cancel a running verification (if possible)."""
+    _require_api_token(request)
     run_state = get_run(run_id)
 
     if run_state.state.status in (PipelineStatus.COMPLETE, PipelineStatus.ERROR):
@@ -1678,10 +2002,20 @@ async def cancel_run(run_id: str) -> Dict[str, Any]:
             "message": "Run already completed or errored",
         }
 
-    # Mark as cancelled (background task will check this)
+    run_state.request_cancel()
     run_state.state.status = PipelineStatus.ERROR
     run_state.state.error = "Cancelled by user"
     run_state.error = "Cancelled by user"
+
+    # Best-effort notify connected clients immediately
+    await ws_manager.broadcast(
+        run_id,
+        WebSocketMessage(
+            type="error",
+            run_id=run_id,
+            data={"error": "Cancelled by user", "cancelled": True},
+        ),
+    )
 
     return {
         "run_id": run_id,
@@ -1691,8 +2025,9 @@ async def cancel_run(run_id: str) -> Dict[str, Any]:
 
 
 @app.get("/runs")
-async def list_runs() -> Dict[str, Any]:
+async def list_runs(request: Request) -> Dict[str, Any]:
     """List all verification runs."""
+    _require_api_token(request)
     runs = []
     for run_id, run_state in _runs.items():
         runs.append(
@@ -1726,6 +2061,17 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
     Messages are sent as JSON with types: 'progress', 'verdict', 'error'.
     """
     logger.info(f"🔌 [WS] Connection attempt for run_id: {run_id}")
+
+    # In production, require an API token in the query string.
+    # Note: browser WebSocket APIs cannot set custom headers reliably.
+    if PRODUCTION_MODE:
+        token = websocket.query_params.get("token", "")
+        if not token or token != (API_TOKEN or ""):
+            try:
+                await websocket.close(code=1008)
+            except Exception:
+                pass
+            return
     
     try:
         await ws_manager.connect(websocket, run_id)
@@ -1809,6 +2155,21 @@ async def startup_event() -> None:
     """Initialize on startup."""
     logger.info("CVA API v1.2 starting up...")
     logger.info("Endpoints: /run, /status/{run_id}, /verdict/{run_id}, /ws/{run_id}")
+
+    # Ensure runtime directories exist (important on Railway + ephemeral filesystems).
+    try:
+        UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+        RUN_ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to create runtime dirs: {e}")
+
+    logger.info(
+        "Startup config: production=%s port=%s upload_root=%s run_artifacts_root=%s",
+        PRODUCTION_MODE,
+        os.getenv("PORT", ""),
+        str(UPLOAD_ROOT),
+        str(RUN_ARTIFACTS_ROOT),
+    )
 
 
 @app.on_event("shutdown")
