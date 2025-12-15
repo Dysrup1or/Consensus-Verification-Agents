@@ -54,7 +54,7 @@ export default function ConstitutionInput({ value, onChange, disabled }: Constit
           <div className="group relative">
             <Info className="w-4 h-4 text-textMuted cursor-help" />
             <div className="absolute left-0 top-6 w-64 p-3 rounded-lg bg-panel border border-border text-xs text-textSecondary opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10 shadow-lg">
-              Define the rules and invariants your code must follow. The AI tribunal will verify compliance against these requirements.
+              Write a short checklist of what “good” looks like for this repo. Keep rules specific and testable (security, quality, architecture). If you’re not sure, click Examples.
             </div>
           </div>
         </div>
@@ -88,19 +88,28 @@ export default function ConstitutionInput({ value, onChange, disabled }: Constit
         </div>
       )}
 
+      <p className="text-xs text-textMuted">
+        If you don’t know what to write yet, start with 5–10 rules (security, correctness, tests, code style). You can use Examples as a template.
+      </p>
+
       {/* Main textarea */}
       <div className="relative">
         <textarea
           value={value}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}
-          placeholder={`Enter your code requirements and invariants...
+          placeholder={`Write the “rules of the road” for this codebase.
+
+Good rules are specific + checkable. Aim for 5–10.
 
 Example:
-1. All functions must have type hints
-2. No use of eval() or exec()
-3. API endpoints must validate authentication
-4. Maximum cyclomatic complexity of 10`}
+1. No hardcoded secrets (keys/passwords/tokens)
+2. All endpoints require auth (unless explicitly public)
+3. Input validation on every request boundary
+4. Tests required for new features / bug fixes
+5. No unsafe dynamic execution (eval/exec)
+
+Tip: Click Examples to paste a starter set.`}
           rows={8}
           className={clsx(
             'w-full px-4 py-3 rounded-lg bg-surface border border-border',

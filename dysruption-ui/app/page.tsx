@@ -792,14 +792,16 @@ export default function Dashboard() {
                         onChange={(e) => setSelectedRepo(e.target.value)}
                         disabled={isRunning || isLoadingRepos}
                         className={clsx(
-                          'w-full px-3 py-2 rounded-lg bg-background border border-border text-sm',
+                          'w-full px-3 py-2 rounded-lg bg-surface border border-border text-sm text-textPrimary',
                           'focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary',
                           (isRunning || isLoadingRepos) && 'opacity-50 cursor-not-allowed'
                         )}
                       >
-                        <option value="">{isLoadingRepos ? 'Loading repos…' : 'Select a repo'}</option>
+                        <option value="" className="text-textMuted">
+                          {isLoadingRepos ? 'Loading repos…' : 'Select a repo'}
+                        </option>
                         {githubRepos.map((r) => (
-                          <option key={r.id} value={r.full_name}>
+                          <option key={r.id} value={r.full_name} className="text-textPrimary">
                             {r.full_name}{r.private ? ' (private)' : ''}
                           </option>
                         ))}
@@ -814,14 +816,16 @@ export default function Dashboard() {
                         onChange={(e) => setSelectedRef(e.target.value)}
                         disabled={isRunning || !selectedRepo || isLoadingBranches}
                         className={clsx(
-                          'w-full px-3 py-2 rounded-lg bg-background border border-border text-sm',
+                          'w-full px-3 py-2 rounded-lg bg-surface border border-border text-sm text-textPrimary',
                           'focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary',
                           (isRunning || !selectedRepo || isLoadingBranches) && 'opacity-50 cursor-not-allowed'
                         )}
                       >
-                        <option value="">{!selectedRepo ? 'Select a repo first' : isLoadingBranches ? 'Loading branches…' : 'Select a branch'}</option>
+                        <option value="" className="text-textMuted">
+                          {!selectedRepo ? 'Select a repo first' : isLoadingBranches ? 'Loading branches…' : 'Select a branch'}
+                        </option>
                         {githubBranches.map((b) => (
-                          <option key={b.name} value={b.name}>
+                          <option key={b.name} value={b.name} className="text-textPrimary">
                             {b.name}{b.protected ? ' (protected)' : ''}
                           </option>
                         ))}
