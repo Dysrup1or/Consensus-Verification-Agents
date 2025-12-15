@@ -7,7 +7,12 @@ export const runtime = 'nodejs';
 function resolveBackendBaseUrl(): string {
   const raw = (process.env.CVA_BACKEND_URL || '').trim();
   const fallback = process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8001';
-  const baseUrl = (raw || fallback).replace(/\/$/, '');
+  let baseUrl = (raw || fallback).replace(/\/$/, '');
+
+  // Accept a bare hostname like "my-api.up.railway.app".
+  if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
+    baseUrl = `https://${baseUrl}`;
+  }
 
   if (!baseUrl) {
     throw new Error(
