@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Intentionally minimal; configure API endpoints via NEXT_PUBLIC_API_URL / NEXT_PUBLIC_WS_URL
-  output: 'export',
+  // Intentionally minimal; this app uses NextAuth + server routes (/api/*),
+  // so it must run in server mode (do not use `output: 'export'`).
   images: {
     unoptimized: true,
   },
