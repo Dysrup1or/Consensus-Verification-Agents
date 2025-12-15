@@ -123,7 +123,9 @@ async function uploadBatchToBackend(args: {
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
-    throw new Error(`Backend upload failed (${resp.status}): ${text.slice(0, 300)}`);
+    throw new Error(
+      `Backend upload failed (${resp.status}) (baseUrl=${baseUrl}, path=/upload): ${text.slice(0, 300)}`
+    );
   }
 
   return (await resp.json()) as { upload_id: string; path: string; count: number };
