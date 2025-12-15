@@ -2,12 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
 import { authOptions } from '@/lib/auth';
 
+export const runtime = 'nodejs';
+
 const BACKEND_BASE_URL = (process.env.CVA_BACKEND_URL || 'http://localhost:8001').replace(/\/$/, '');
 
 function shouldRequireUserSession(): boolean {
   // Require auth in production by default.
   // In development, allow running without OAuth configured.
-  if (process.env.CVA_REQUIRE_AUTH?.toLowerCase() === 'true') return true;
+  const requireAuth = process.env.CVA_REQUIRE_AUTH;
+  if (typeof requireAuth === 'string' && requireAuth.toLowerCase() === 'true') return true;
   return process.env.NODE_ENV === 'production';
 }
 
