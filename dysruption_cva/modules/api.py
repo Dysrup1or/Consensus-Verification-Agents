@@ -433,6 +433,24 @@ async def _startup_apply_migrations() -> None:
     # Optional continuous monitoring worker (single-process).
     # Enable with CVA_MONITOR_WORKER=true.
     try:
+        monitor_enabled = os.getenv("CVA_MONITOR_WORKER", "false").lower() == "true"
+        apply_migrations_enabled = os.getenv("CVA_APPLY_MIGRATIONS", "false").lower() == "true"
+
+        # Guard: on Postgres, the monitor worker requires SQL migrations (monitor_jobs, etc.).
+        # If migrations aren't enabled, skip starting the worker rather than crash-looping.
+        try:
+            engine = get_engine()
+            dialect_name = getattr(engine.dialect, "name", "")
+        except Exception:
+            dialect_name = ""
+
+        if monitor_enabled and dialect_name and dialect_name != "sqlite" and not apply_migrations_enabled:
+            logger.error(
+                "Monitor worker enabled but migrations are not. Set CVA_APPLY_MIGRATIONS=true to create required tables. "
+                f"(dialect={dialect_name})"
+            )
+            return
+
         asyncio.create_task(run_monitor_worker_loop())
     except Exception:
         logger.exception("Failed to start monitor worker")
