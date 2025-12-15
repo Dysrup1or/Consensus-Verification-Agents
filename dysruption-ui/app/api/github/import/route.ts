@@ -10,9 +10,10 @@ function resolveBackendBaseUrl(): string {
   const fallback = process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8001';
   let baseUrl = (raw || fallback).replace(/\/$/, '');
 
-  // Accept a bare hostname like "my-api.up.railway.app".
+  // Accept a bare hostname. Prefer http for Railway private networking.
   if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
-    baseUrl = `https://${baseUrl}`;
+    const shouldUseHttp = baseUrl.endsWith('.railway.internal') || !baseUrl.includes('.');
+    baseUrl = `${shouldUseHttp ? 'http' : 'https'}://${baseUrl}`;
   }
 
   if (!baseUrl) {
