@@ -4,7 +4,28 @@ import { authOptions } from '@/lib/auth';
 
 export const runtime = 'nodejs';
 
-const BACKEND_BASE_URL = (process.env.CVA_BACKEND_URL || 'http://localhost:8001').replace(/\/$/, '');
+function resolveBackendBaseUrl(): string {
+  const raw = (process.env.CVA_BACKEND_URL || '').trim();
+  const fallback = process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8001';
+  const baseUrl = (raw || fallback).replace(/\/$/, '');
+
+  if (!baseUrl) {
+    throw new Error(
+      'Missing CVA_BACKEND_URL. Set CVA_BACKEND_URL to the CVA backend origin (e.g. https://<api-service-domain>).'
+    );
+  }
+
+  if (
+    process.env.NODE_ENV === 'production' &&
+    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|::1)(:|\/|$)/i.test(baseUrl)
+  ) {
+    throw new Error(
+      `Invalid CVA_BACKEND_URL in production (${baseUrl}). It cannot point to localhost; set it to your deployed CVA backend.`
+    );
+  }
+
+  return baseUrl;
+}
 
 function shouldRequireUserSession(): boolean {
   // Require auth in production by default.
@@ -27,7 +48,8 @@ function buildBackendUrl(req: NextRequest, pathSegments: string[]): string {
   const pathname = pathSegments.join('/');
   const url = new URL(req.url);
   const qs = url.search ? url.search : '';
-  return `${BACKEND_BASE_URL}/${pathname}${qs}`;
+  const baseUrl = resolveBackendBaseUrl();
+  return `${baseUrl}/${pathname}${qs}`;
 }
 
 function buildForwardHeaders(req: NextRequest): Headers {
@@ -50,6 +72,16 @@ async function proxy(req: NextRequest, pathSegments: string[]) {
   const authReject = await ensureSessionOrReject();
   if (authReject) return authReject;
 
+  let baseUrl: string;
+  try {
+    baseUrl = resolveBackendBaseUrl();
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: 'backend_not_configured', detail: err?.message || String(err) },
+      { status: 500 }
+    );
+  }
+
   const backendUrl = buildBackendUrl(req, pathSegments);
   const headers = buildForwardHeaders(req);
 
@@ -57,13 +89,25 @@ async function proxy(req: NextRequest, pathSegments: string[]) {
   const hasBody = method !== 'GET' && method !== 'HEAD';
   const body = hasBody ? await req.arrayBuffer() : undefined;
 
-  const resp = await fetch(backendUrl, {
-    method,
-    headers,
-    body,
-    // Avoid caching user-specific responses.
-    cache: 'no-store',
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(backendUrl, {
+      method,
+      headers,
+      body,
+      // Avoid caching user-specific responses.
+      cache: 'no-store',
+    });
+  } catch (err: any) {
+    const msg = err?.cause?.message || err?.message || String(err);
+    return NextResponse.json(
+      {
+        error: 'backend_unreachable',
+        detail: `Failed to reach CVA backend (baseUrl=${baseUrl}). ${msg}`,
+      },
+      { status: 502 }
+    );
+  }
 
   const responseHeaders = new Headers();
   const respContentType = resp.headers.get('content-type');

@@ -5,6 +5,29 @@ import { Readable } from 'stream';
 
 export const runtime = 'nodejs';
 
+function resolveBackendBaseUrl(): string {
+  const raw = (process.env.CVA_BACKEND_URL || '').trim();
+  const fallback = process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8001';
+  const baseUrl = (raw || fallback).replace(/\/$/, '');
+
+  if (!baseUrl) {
+    throw new Error(
+      'Missing CVA_BACKEND_URL. Set CVA_BACKEND_URL to the CVA backend origin (e.g. https://<api-service-domain>).'
+    );
+  }
+
+  if (
+    process.env.NODE_ENV === 'production' &&
+    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|::1)(:|\/|$)/i.test(baseUrl)
+  ) {
+    throw new Error(
+      `Invalid CVA_BACKEND_URL in production (${baseUrl}). It cannot point to localhost; set it to your deployed CVA backend.`
+    );
+  }
+
+  return baseUrl;
+}
+
 function getGitHubAccessToken(session: any): string | null {
   return (session as any)?.githubAccessToken ?? null;
 }
@@ -64,7 +87,7 @@ async function uploadBatchToBackend(args: {
   files: Array<{ relPath: string; content: Uint8Array }>;
   uploadId: string | null;
 }): Promise<{ upload_id: string; path: string; count: number }> {
-  const baseUrl = (process.env.CVA_BACKEND_URL || 'http://localhost:8001').replace(/\/$/, '');
+  const baseUrl = resolveBackendBaseUrl();
   const apiToken = process.env.CVA_API_TOKEN;
 
   const form = new FormData();
@@ -77,12 +100,20 @@ async function uploadBatchToBackend(args: {
     form.append('upload_id', args.uploadId);
   }
 
-  const resp = await fetch(`${baseUrl}/upload`, {
-    method: 'POST',
-    headers: apiToken ? { Authorization: `Bearer ${apiToken}` } : undefined,
-    body: form,
-    cache: 'no-store',
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`${baseUrl}/upload`, {
+      method: 'POST',
+      headers: apiToken ? { Authorization: `Bearer ${apiToken}` } : undefined,
+      body: form,
+      cache: 'no-store',
+    });
+  } catch (err: any) {
+    const msg = err?.cause?.message || err?.message || String(err);
+    throw new Error(
+      `Backend upload request failed (baseUrl=${baseUrl}). Ensure the CVA backend is running and reachable, and CVA_BACKEND_URL is correct. ${msg}`
+    );
+  }
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
