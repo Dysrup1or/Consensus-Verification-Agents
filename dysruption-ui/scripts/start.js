@@ -1,10 +1,17 @@
 const { spawn } = require('child_process');
 
 const port = process.env.PORT || '3000';
+const hostname = process.env.HOSTNAME;
 
 const child = spawn(
   process.execPath,
-  ['node_modules/next/dist/bin/next', 'start', '-p', String(port)],
+  [
+    'node_modules/next/dist/bin/next',
+    'start',
+    '-p',
+    String(port),
+    ...(hostname ? ['-H', String(hostname)] : []),
+  ],
   {
     stdio: 'inherit',
     env: process.env,
