@@ -32,6 +32,7 @@ if (process.env.GITHUB_ID && process.env.GITHUB_SECRET) {
 export const authOptions: NextAuthOptions = {
   providers,
   secret: process.env.NEXTAUTH_SECRET,
+  debug: process.env.NEXTAUTH_DEBUG?.toLowerCase() === 'true',
   session: { strategy: 'jwt' },
   pages: {
     signIn: '/login',
