@@ -73,7 +73,6 @@ REQUIRED_FRONTEND_FILES = [
     "components/Verdict.tsx",
     "components/PatchDiff.tsx",
     "lib/ws.ts",
-    "lib/mock.ts",
 ]
 
 # ============================================================
@@ -124,11 +123,20 @@ def check_env_file() -> CheckResult:
     """Verify .env file exists and contains required keys."""
     env_path = BACKEND_DIR / ".env"
     if not env_path.exists():
+        missing_from_env = [var for var in REQUIRED_ENV_VARS if not os.environ.get(var)]
+
+        if not missing_from_env:
+            return CheckResult(
+                ".env File",
+                Status.PASS,
+                "No .env file (using environment variables)",
+            )
+
         return CheckResult(
             ".env File",
-            Status.FAIL,
-            "Missing .env file",
-            f"Create {env_path} with API keys"
+            Status.WARN,
+            "No .env file and API keys not found in environment",
+            f"Set env vars ({', '.join(REQUIRED_ENV_VARS)}) or create {env_path}"
         )
     
     content = env_path.read_text()

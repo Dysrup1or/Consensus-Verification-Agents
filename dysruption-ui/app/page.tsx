@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from 'react';
+import { signIn, useSession } from 'next-auth/react';
 import { CVAWebSocket, ConnectionStatus } from '@/lib/ws';
 import { startRun, fetchVerdict, fetchRuns, fetchStatus, fetchPrompt, fetchVerdictsPayload, cancelRun } from '@/lib/api';
 import {
@@ -18,7 +19,6 @@ import StatusBadge from '@/components/StatusBadge';
 import Verdict from '@/components/Verdict';
 import PatchDiff from '@/components/PatchDiff';
 import Toast from '@/components/Toast';
-import FileDropZone from '@/components/FileDropZone';
 import ConstitutionInput from '@/components/ConstitutionInput';
 import PromptRecommendation from '@/components/PromptRecommendation';
 import RunDiagnostics from '@/components/RunDiagnostics';
@@ -32,7 +32,22 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 
+type GitHubRepoListItem = {
+  id: number;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+};
+
+type GitHubBranchListItem = {
+  name: string;
+  protected: boolean;
+};
+
 export default function Dashboard() {
+  const { data: session } = useSession();
+  const hasGitHubToken = Boolean((session as any)?.githubAccessToken);
+
   // Pipeline state
   const [status, setStatus] = useState<PipelineStatus>('idle');
   const [progress, setProgress] = useState<number>(0);
@@ -55,6 +70,15 @@ export default function Dashboard() {
   // Inputs
   const [targetPath, setTargetPath] = useState<string>('');
   const [constitution, setConstitution] = useState<string>('');
+
+  // GitHub-native inputs
+  const [githubRepos, setGithubRepos] = useState<GitHubRepoListItem[]>([]);
+  const [githubBranches, setGithubBranches] = useState<GitHubBranchListItem[]>([]);
+  const [selectedRepo, setSelectedRepo] = useState<string>('');
+  const [selectedRef, setSelectedRef] = useState<string>('');
+  const [isLoadingRepos, setIsLoadingRepos] = useState(false);
+  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
+  const [importSummary, setImportSummary] = useState<{ repo: string; ref: string; fileCount: number } | null>(null);
 
   // Options
   const [allowAutoFix, setAllowAutoFix] = useState<boolean>(true);
@@ -186,7 +210,7 @@ export default function Dashboard() {
       setMessage(data.error);
       setToastMsg(`Error: ${data.error}`);
     }
-  }, [currentRunId]);
+  }, [currentRunId, fetchDiagnostics]);
 
   const handleCancelRun = async () => {
     if (!currentRunId) return;
@@ -209,82 +233,155 @@ export default function Dashboard() {
     }
   };
 
-  // Handle file selection
-  const handleFilesSelected = (files: FileList | null, path?: string) => {
-    if (path) {
-      setTargetPath(path);
-    } else if (files && files.length > 0) {
-      const pathStr = `[${files.length} files selected]`;
-      setTargetPath(pathStr);
-    } else {
-      // no-op
-    }
-  };
+  // Load GitHub repos when the GitHub session token is present.
+  useEffect(() => {
+    let cancelled = false;
 
-  // Path validation helper
-  const validateTargetPath = (path: string): { valid: boolean; error?: string; resolvedPath?: string } => {
-    // Check for empty
-    if (!path || !path.trim()) {
-      return { valid: false, error: 'Please enter a path to your project directory' };
-    }
-    
-    const trimmedPath = path.trim();
-    
-    // Check for file picker placeholder (the dangerous case!)
-    if (trimmedPath.startsWith('[') && trimmedPath.endsWith(']')) {
-      return { 
-        valid: false, 
-        error: 'Browser file picker cannot provide the actual path. Please manually enter the absolute path to your project (e.g., C:\\Users\\you\\Projects\\my-app)' 
-      };
-    }
-    
-    // Check for relative paths
-    if (trimmedPath === '.' || trimmedPath === '..' || trimmedPath.startsWith('./') || trimmedPath.startsWith('../')) {
-      return { valid: false, error: 'Relative paths are not allowed. Please enter an absolute path (e.g., C:\\Users\\...)' };
-    }
-    
-    // Check for absolute path (Windows or Unix)
-    const isAbsoluteWindows = /^[A-Za-z]:\\/.test(trimmedPath);
-    const isAbsoluteUnix = trimmedPath.startsWith('/');
-    
-    if (!isAbsoluteWindows && !isAbsoluteUnix) {
-      return { valid: false, error: 'Please enter an absolute path starting with a drive letter (C:\\...) or forward slash (/...)' };
-    }
-    
-    // Warn if trying to scan CVA itself - BUT allow temp_uploads (user uploaded files)
-    const lowerPath = trimmedPath.toLowerCase();
-    const isTempUpload = lowerPath.includes('temp_uploads');
-    
-    if (!isTempUpload) {
-      if (lowerPath.includes('consensus verifier agent') || 
-          lowerPath.includes('dysruption_cva') || 
-          lowerPath.includes('dysruption-ui')) {
-        return { valid: false, error: 'Cannot scan the CVA application itself. Please select your target project directory.' };
-      }
-    }
-    
-    return { valid: true, resolvedPath: trimmedPath };
-  };
-
-  // Start verification
-  const handleStartRun = async () => {
-    // Validate the path
-    const validation = validateTargetPath(targetPath);
-    if (!validation.valid) {
-      setToastMsg(validation.error || 'Invalid path');
+    if (!hasGitHubToken) {
+      setGithubRepos([]);
+      setGithubBranches([]);
+      setSelectedRepo('');
+      setSelectedRef('');
+      setTargetPath('');
+      setImportSummary(null);
       return;
     }
 
+    (async () => {
+      setIsLoadingRepos(true);
+      try {
+        const resp = await fetch('/api/github/repos', { cache: 'no-store' });
+        if (!resp.ok) {
+          const payload = await resp.json().catch(() => null as any);
+          const error = payload?.error ? String(payload.error) : `HTTP ${resp.status}`;
+          throw new Error(`Failed to load repos (${error})`);
+        }
+
+        const data = (await resp.json()) as { repos?: GitHubRepoListItem[] };
+        if (cancelled) return;
+
+        const repos = Array.isArray(data.repos) ? data.repos : [];
+        setGithubRepos(repos);
+      } catch (e: any) {
+        if (cancelled) return;
+        setToastMsg(e?.message || 'Failed to load GitHub repos');
+        setGithubRepos([]);
+      } finally {
+        if (cancelled) return;
+        setIsLoadingRepos(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasGitHubToken]);
+
+  // Load branches when repo changes.
+  useEffect(() => {
+    let cancelled = false;
+
+    setGithubBranches([]);
+    setTargetPath('');
+    setImportSummary(null);
+
+    if (!hasGitHubToken || !selectedRepo) {
+      setSelectedRef('');
+      return;
+    }
+
+    const repoItem = githubRepos.find((r) => r.full_name === selectedRepo);
+    const defaultBranch = repoItem?.default_branch || 'HEAD';
+    setSelectedRef(defaultBranch);
+
+    (async () => {
+      setIsLoadingBranches(true);
+      try {
+        const resp = await fetch(`/api/github/branches?repo=${encodeURIComponent(selectedRepo)}`, { cache: 'no-store' });
+        if (!resp.ok) {
+          const payload = await resp.json().catch(() => null as any);
+          const error = payload?.error ? String(payload.error) : `HTTP ${resp.status}`;
+          throw new Error(`Failed to load branches (${error})`);
+        }
+        const data = (await resp.json()) as { branches?: GitHubBranchListItem[] };
+        if (cancelled) return;
+
+        const branches = Array.isArray(data.branches) ? data.branches : [];
+        setGithubBranches(branches);
+      } catch (e: any) {
+        if (cancelled) return;
+        setToastMsg(e?.message || 'Failed to load branches');
+        setGithubBranches([]);
+      } finally {
+        if (cancelled) return;
+        setIsLoadingBranches(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasGitHubToken, selectedRepo, githubRepos]);
+
+  // Start verification
+  const handleStartRun = async () => {
+    if (!hasGitHubToken) {
+      setToastMsg('Connect GitHub to import a repository');
+      await signIn('github', { callbackUrl: '/' });
+      return;
+    }
+
+    if (!selectedRepo) {
+      setToastMsg('Select a GitHub repository');
+      return;
+    }
+
+    const desiredRef = selectedRef?.trim() || 'HEAD';
+
     try {
+      // Import repo if we don't have a fresh backend target yet.
+      let pathToUse = targetPath;
+
+      if (!pathToUse || importSummary?.repo !== selectedRepo || importSummary?.ref !== desiredRef) {
+        setStatus('scanning');
+        setProgress(0);
+        setMessage('Importing from GitHub...');
+
+        const importResp = await fetch('/api/github/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo: selectedRepo, ref: desiredRef }),
+          cache: 'no-store',
+        });
+
+        if (!importResp.ok) {
+          const payload = await importResp.json().catch(() => null as any);
+          const error = payload?.error ? String(payload.error) : `HTTP ${importResp.status}`;
+          throw new Error(`GitHub import failed (${error})`);
+        }
+
+        const imported = (await importResp.json()) as {
+          targetPath: string;
+          fileCount: number;
+          repo: string;
+          ref: string;
+        };
+
+        pathToUse = imported.targetPath;
+        setTargetPath(imported.targetPath);
+        setImportSummary({ repo: imported.repo, ref: imported.ref, fileCount: imported.fileCount });
+      }
+
       setStatus('scanning');
       setProgress(0);
       setMessage('Starting verification...');
       setConsensus(null);
       setPatches(null);
+      setReportMarkdown(null);
+      setPatchDiff(null);
       setPromptData(null);
       setDiagnosticsTelemetry(null);
-      
-      const pathToUse = validation.resolvedPath!;
+
       // Pass constitution text if user provided any rules
       const specContent = constitution.trim() || undefined;
       const resp = await startRun(pathToUse, specContent, undefined, { generatePatches: allowAutoFix });
@@ -496,9 +593,9 @@ export default function Dashboard() {
     }, 2000); // Poll every 2 seconds
 
     return () => clearInterval(pollInterval);
-  }, [currentRunId, isRunning, wsStatus]);
+  }, [currentRunId, isRunning, wsStatus, fetchDiagnostics]);
 
-  const canStart = targetPath && !isRunning;
+  const canStart = hasGitHubToken && selectedRepo && selectedRef && !isRunning;
 
   return (
     <main className="min-h-screen bg-bg text-textPrimary font-sans">
@@ -661,7 +758,89 @@ export default function Dashboard() {
             </div>
 
             <div className="mt-6 space-y-4">
-              <FileDropZone onFilesSelected={handleFilesSelected} disabled={isRunning} />
+              <div className="p-4 rounded-xl bg-bg border border-border space-y-3">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium">GitHub Repository</p>
+                    <p className="text-xs text-textMuted mt-1">
+                      Import code from GitHub (no local paths, no drag/drop).
+                    </p>
+                  </div>
+                  {!hasGitHubToken && (
+                    <button
+                      type="button"
+                      onClick={() => signIn('github', { callbackUrl: '/' })}
+                      disabled={isRunning}
+                      className={clsx(
+                        'px-3 py-1.5 rounded-lg bg-primary text-white text-xs font-medium',
+                        'hover:bg-primaryHover transition-colors',
+                        isRunning && 'opacity-50 cursor-not-allowed'
+                      )}
+                    >
+                      Connect GitHub
+                    </button>
+                  )}
+                </div>
+
+                {hasGitHubToken ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs text-textMuted uppercase tracking-wider">Repository</label>
+                      <select
+                        aria-label="Repository"
+                        value={selectedRepo}
+                        onChange={(e) => setSelectedRepo(e.target.value)}
+                        disabled={isRunning || isLoadingRepos}
+                        className={clsx(
+                          'w-full px-3 py-2 rounded-lg bg-background border border-border text-sm',
+                          'focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary',
+                          (isRunning || isLoadingRepos) && 'opacity-50 cursor-not-allowed'
+                        )}
+                      >
+                        <option value="">{isLoadingRepos ? 'Loading repos…' : 'Select a repo'}</option>
+                        {githubRepos.map((r) => (
+                          <option key={r.id} value={r.full_name}>
+                            {r.full_name}{r.private ? ' (private)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs text-textMuted uppercase tracking-wider">Branch</label>
+                      <select
+                        aria-label="Branch"
+                        value={selectedRef}
+                        onChange={(e) => setSelectedRef(e.target.value)}
+                        disabled={isRunning || !selectedRepo || isLoadingBranches}
+                        className={clsx(
+                          'w-full px-3 py-2 rounded-lg bg-background border border-border text-sm',
+                          'focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary',
+                          (isRunning || !selectedRepo || isLoadingBranches) && 'opacity-50 cursor-not-allowed'
+                        )}
+                      >
+                        <option value="">{!selectedRepo ? 'Select a repo first' : isLoadingBranches ? 'Loading branches…' : 'Select a branch'}</option>
+                        {githubBranches.map((b) => (
+                          <option key={b.name} value={b.name}>
+                            {b.name}{b.protected ? ' (protected)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-textMuted">
+                    Sign in with GitHub to list repositories.
+                  </p>
+                )}
+
+                {importSummary && (
+                  <div className="text-xs text-textMuted">
+                    Imported <span className="font-semibold text-textSecondary">{importSummary.fileCount}</span> files from{' '}
+                    <span className="font-mono text-textSecondary">{importSummary.repo}@{importSummary.ref}</span>
+                  </div>
+                )}
+              </div>
               <ConstitutionInput value={constitution} onChange={setConstitution} disabled={isRunning} />
             </div>
           </section>

@@ -1,5 +1,18 @@
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+
+jest.mock('next-auth/react', () => {
+  return {
+    useSession: () => ({
+      data: {
+        user: { name: 'Test User' },
+        githubAccessToken: 'gho_testtoken',
+      },
+      status: 'authenticated',
+    }),
+    signIn: jest.fn(async () => undefined),
+  };
+});
 
 jest.mock('@/lib/ws', () => {
   class CVAWebSocket {
@@ -9,16 +22,6 @@ jest.mock('@/lib/ws', () => {
     stop() {}
   }
   return { CVAWebSocket };
-});
-
-jest.mock('@/components/FileDropZone', () => {
-  return function FileDropZoneMock(props: any) {
-    return (
-      <button onClick={() => props.onFilesSelected(null, 'C:\\Temp\\myproj')}>
-        SelectPath
-      </button>
-    );
-  };
 });
 
 jest.mock('@/components/ConstitutionInput', () => {
@@ -54,11 +57,59 @@ import Dashboard from '@/app/page';
 import { cancelRun } from '@/lib/api';
 
 describe('Dashboard cancel', () => {
+  beforeEach(() => {
+    (global as any).fetch = jest.fn(async (input: any, init?: any) => {
+      const url = typeof input === 'string' ? input : String(input?.url || input);
+
+      if (url.startsWith('/api/github/repos')) {
+        return {
+          ok: true,
+          json: async () => ({
+            repos: [
+              { id: 1, full_name: 'acme/repo', private: false, default_branch: 'main' },
+            ],
+          }),
+        } as any;
+      }
+
+      if (url.startsWith('/api/github/branches')) {
+        return {
+          ok: true,
+          json: async () => ({
+            branches: [{ name: 'main', protected: false }],
+          }),
+        } as any;
+      }
+
+      if (url.startsWith('/api/github/import') && (init?.method || 'GET') === 'POST') {
+        return {
+          ok: true,
+          json: async () => ({
+            targetPath: '/tmp/upload_123',
+            fileCount: 3,
+            repo: 'acme/repo',
+            ref: 'main',
+          }),
+        } as any;
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
   it('shows Cancel while running and calls cancelRun', async () => {
     render(<Dashboard />);
 
-    fireEvent.click(screen.getByText('SelectPath'));
-    fireEvent.click(screen.getByRole('button', { name: /Verify Invariant/i }));
+    const repoSelect = await screen.findByLabelText('Repository');
+    fireEvent.change(repoSelect, { target: { value: 'acme/repo' } });
+
+    const verify = screen.getByRole('button', { name: /Verify Invariant/i });
+    await waitFor(() => expect(verify).not.toBeDisabled());
+    fireEvent.click(verify);
 
     const cancel = await screen.findByRole('button', { name: 'Cancel' });
     fireEvent.click(cancel);
@@ -72,8 +123,12 @@ describe('Dashboard cancel', () => {
 
     render(<Dashboard />);
 
-    fireEvent.click(screen.getByText('SelectPath'));
-    fireEvent.click(screen.getByRole('button', { name: /Verify Invariant/i }));
+    const repoSelect = await screen.findByLabelText('Repository');
+    fireEvent.change(repoSelect, { target: { value: 'acme/repo' } });
+
+    const verify = screen.getByRole('button', { name: /Verify Invariant/i });
+    await waitFor(() => expect(verify).not.toBeDisabled());
+    fireEvent.click(verify);
 
     const cancel = await screen.findByRole('button', { name: 'Cancel' });
     fireEvent.click(cancel);

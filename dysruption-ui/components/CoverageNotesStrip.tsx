@@ -24,7 +24,7 @@ function groupReasons(skipReasons: Record<string, string>): Array<{ reason: stri
 }
 
 export default function CoverageNotesStrip({ coverage }: CoverageNotesStripProps) {
-  const skipReasons = coverage?.skip_reasons ?? {};
+  const skipReasons = useMemo(() => coverage?.skip_reasons ?? {}, [coverage?.skip_reasons]);
 
   const shouldShow =
     (Number.isFinite(coverage?.fully_covered_percent_of_changed) && coverage.fully_covered_percent_of_changed < 100) ||

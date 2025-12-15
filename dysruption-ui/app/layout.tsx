@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { ThemeProvider } from '@/lib/theme';
+import { Providers } from './providers';
 
 export const metadata: Metadata = {
   title: "Invariant - Verification Coach",
@@ -15,7 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <ThemeProvider>{children}</ThemeProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

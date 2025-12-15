@@ -18,6 +18,13 @@ if (process.env.GITHUB_ID && process.env.GITHUB_SECRET) {
     GitHubProvider({
       clientId: process.env.GITHUB_ID,
       clientSecret: process.env.GITHUB_SECRET,
+      authorization: {
+        params: {
+          // Minimal set to list repos/branches and download zipballs.
+          // Includes private repos if the user chooses them.
+          scope: 'read:user user:email repo',
+        },
+      },
     })
   );
 }
@@ -28,5 +35,17 @@ export const authOptions: NextAuthOptions = {
   session: { strategy: 'jwt' },
   pages: {
     signIn: '/login',
+  },
+  callbacks: {
+    async jwt({ token, account }) {
+      if (account?.provider === 'github' && account.access_token) {
+        (token as any).githubAccessToken = account.access_token;
+      }
+      return token;
+    },
+    async session({ session, token }) {
+      (session as any).githubAccessToken = (token as any).githubAccessToken;
+      return session;
+    },
   },
 };
