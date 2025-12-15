@@ -15,13 +15,18 @@ const API_BASE = '/api/cva';
 /**
  * Start a new verification run.
  */
-export async function startRun(targetDir: string, specContent?: string, specPath?: string): Promise<RunResponse> {
+export async function startRun(
+  targetDir: string,
+  specContent?: string,
+  specPath?: string,
+  options?: { generatePatches?: boolean; watchMode?: boolean }
+): Promise<RunResponse> {
   const payload = {
     target_dir: targetDir,
     spec_path: specPath,
     spec_content: specContent,
-    watch_mode: false,
-    generate_patches: true,
+    watch_mode: options?.watchMode ?? false,
+    generate_patches: options?.generatePatches ?? true,
   };
 
   try {

@@ -260,8 +260,16 @@ export interface TelemetryLatency {
   lane2_llm_per_item_latency_ms?: number[] | null;
 }
 
+export interface TelemetryCost {
+  lane1_deterministic_tokens: number;
+  lane2_llm_input_tokens_est: number;
+  lane2_llm_stable_prefix_tokens_est: number;
+  lane2_llm_variable_suffix_tokens_est: number;
+}
+
 export interface RunTelemetry {
   coverage: TelemetryCoverage;
+  cost?: TelemetryCost;
   router?: TelemetryRouter | null;
   cache: TelemetryCache;
   latency: TelemetryLatency;

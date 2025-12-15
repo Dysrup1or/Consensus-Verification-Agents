@@ -55,6 +55,9 @@ export default function Dashboard() {
   // Inputs
   const [targetPath, setTargetPath] = useState<string>('');
   const [constitution, setConstitution] = useState<string>('');
+
+  // Options
+  const [allowAutoFix, setAllowAutoFix] = useState<boolean>(true);
   
   // Run management
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
@@ -284,7 +287,7 @@ export default function Dashboard() {
       const pathToUse = validation.resolvedPath!;
       // Pass constitution text if user provided any rules
       const specContent = constitution.trim() || undefined;
-      const resp = await startRun(pathToUse, specContent);
+      const resp = await startRun(pathToUse, specContent, undefined, { generatePatches: allowAutoFix });
       
       setCurrentRunId(resp.run_id);
       setToastMsg(`Verification started`);
@@ -578,143 +581,195 @@ export default function Dashboard() {
           </div>
         )}
 
+        {/* Top panels: Action + Progress */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-          {/* Left: File Upload */}
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                <span className="w-6 h-6 rounded-full bg-primary/10 text-primary text-sm flex items-center justify-center font-bold">1</span>
-                Select Your Code
-              </h2>
-              <FileDropZone 
-                onFilesSelected={handleFilesSelected}
-                disabled={isRunning}
-              />
-            </div>
-          </div>
-
-          {/* Right: Constitution */}
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                <span className="w-6 h-6 rounded-full bg-primary/10 text-primary text-sm flex items-center justify-center font-bold">2</span>
-                Define Your Rules
-              </h2>
-              <ConstitutionInput
-                value={constitution}
-                onChange={setConstitution}
-                disabled={isRunning}
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Start Button */}
-        <div className="flex justify-center mb-12">
-          <button
-            onClick={handleStartRun}
-            disabled={!canStart}
-            className={clsx(
-              'flex items-center gap-3 px-8 py-4 rounded-xl font-semibold text-lg transition-all',
-              'shadow-glow hover:shadow-glow-lg',
-              canStart
-                ? 'bg-primary hover:bg-primaryHover text-white'
-                : 'bg-panel text-textMuted cursor-not-allowed'
-            )}
-          >
-            {isRunning ? (
-              <>
-                <Zap className="w-5 h-5 animate-pulse" />
-                Analyzing...
-              </>
-            ) : (
-              <>
-                <Play className="w-5 h-5" />
-                Start Verification
-              </>
-            )}
-          </button>
-        </div>
-
-        {/* Status & Progress */}
-        {(status !== 'idle' || consensus) && (
-          <div className="mb-8">
+          {/* Left: Primary Action Panel */}
+          <section className="p-6 rounded-2xl bg-surface border border-border">
             <div className="flex items-center justify-between mb-4">
-              <StatusBadge status={status} size="md" />
-              {isRunning && (
-                <div className="flex items-center gap-3">
-                  <div className="w-64 h-3 bg-panel rounded-full overflow-hidden">
-                    <div 
-                      className="h-full bg-gradient-to-r from-primary to-accent transition-all duration-500 ease-out"
-                      style={{ width: `${displayProgress}%` }}
-                    />
-                  </div>
-                  <span className="text-sm text-textMuted font-mono min-w-[3rem]">{displayProgress.toFixed(0)}%</span>
-                </div>
-              )}
-            </div>
-            {isRunning && (
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                <span className="text-sm font-medium text-primary">{getStageLabel(status)}</span>
-                {currentRunId && (
-                  <button
-                    onClick={handleCancelRun}
-                    className="ml-auto px-3 py-1.5 rounded-lg border border-border bg-surface text-textPrimary text-xs hover:border-primary/50 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                )}
+              <div className="flex items-center gap-3">
+                <Shield className="w-5 h-5 text-primary" />
+                <h2 className="text-lg font-semibold">Primary Action Panel</h2>
               </div>
+              <div className="flex items-center gap-2">
+                <div
+                  className={clsx(
+                    'w-2.5 h-2.5 rounded-full',
+                    wsStatus === 'connected'
+                      ? 'bg-success'
+                      : wsStatus === 'reconnecting'
+                        ? 'bg-warning animate-pulse'
+                        : 'bg-danger'
+                  )}
+                />
+                <span className="text-xs text-textMuted">{wsStatus}</span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleStartRun}
+              disabled={!canStart}
+              className={clsx(
+                'w-full flex items-center justify-center gap-3 px-6 py-5 rounded-xl font-semibold text-lg transition-all',
+                'shadow-glow hover:shadow-glow-lg',
+                canStart
+                  ? 'bg-primary hover:bg-primaryHover text-white'
+                  : 'bg-panel text-textMuted cursor-not-allowed'
+              )}
+              aria-label="Verify Invariant"
+            >
+              {isRunning ? (
+                <>
+                  <Zap className="w-5 h-5 animate-pulse" />
+                  Running Verification...
+                </>
+              ) : (
+                <>
+                  <Play className="w-5 h-5" />
+                  VERIFY INVARIANT
+                </>
+              )}
+            </button>
+
+            <div className="mt-4 p-4 rounded-xl bg-bg border border-border">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium">Allow Auto-Fix (Safe Mode)</p>
+                  <p className="text-xs text-textMuted mt-1">
+                    When enabled, the run generates patch artifacts and a fix plan. You can review before applying.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAllowAutoFix((v) => !v)}
+                  disabled={isRunning}
+                  className={clsx(
+                    'relative inline-flex h-6 w-11 items-center rounded-full border transition-colors',
+                    allowAutoFix ? 'bg-primary border-primary' : 'bg-panel border-border',
+                    isRunning && 'opacity-50 cursor-not-allowed'
+                  )}
+                  aria-pressed={allowAutoFix}
+                  aria-label="Toggle auto-fix"
+                >
+                  <span
+                    className={clsx(
+                      'inline-block h-5 w-5 transform rounded-full bg-white transition-transform',
+                      allowAutoFix ? 'translate-x-5' : 'translate-x-0.5'
+                    )}
+                  />
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-6 space-y-4">
+              <FileDropZone onFilesSelected={handleFilesSelected} disabled={isRunning} />
+              <ConstitutionInput value={constitution} onChange={setConstitution} disabled={isRunning} />
+            </div>
+          </section>
+
+          {/* Right: Progress + Results Panel */}
+          <section className="p-6 rounded-2xl bg-surface border border-border">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <Activity className="w-5 h-5 text-primary" />
+                <h2 className="text-lg font-semibold">Progress & Results Panel</h2>
+              </div>
+              <StatusBadge status={status} size="md" />
+            </div>
+
+            {isRunning ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                  <span className="text-sm font-medium text-primary">{getStageLabel(status)}</span>
+                  {currentRunId && (
+                    <button
+                      onClick={handleCancelRun}
+                      className="ml-auto px-3 py-1.5 rounded-lg border border-border bg-bg text-textPrimary text-xs hover:border-primary/50 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+
+                <div className="w-full h-3 bg-panel rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-primary to-accent transition-all duration-500 ease-out"
+                    style={{ width: `${displayProgress}%` }}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between text-xs text-textMuted font-mono">
+                  <span>{displayProgress.toFixed(0)}%</span>
+                  <span className="text-textSecondary">{message}</span>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-textSecondary">{message}</p>
             )}
-            <p className="text-sm text-textSecondary">{message}</p>
-          </div>
-        )}
+
+            <div className="mt-6 grid grid-cols-2 gap-3">
+              <div className="p-3 rounded-xl bg-bg border border-border">
+                <p className="text-xs text-textMuted uppercase tracking-wider">Coverage</p>
+                <p className="text-lg font-semibold">
+                  {diagnosticsTelemetry?.coverage
+                    ? `${Math.round(diagnosticsTelemetry.coverage.fully_covered_percent_of_changed)}%`
+                    : '—'}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-bg border border-border">
+                <p className="text-xs text-textMuted uppercase tracking-wider">Cost (tokens)</p>
+                <p className="text-lg font-semibold">
+                  {diagnosticsTelemetry?.cost
+                    ? (
+                        diagnosticsTelemetry.cost.lane1_deterministic_tokens +
+                        diagnosticsTelemetry.cost.lane2_llm_input_tokens_est +
+                        diagnosticsTelemetry.cost.lane2_llm_stable_prefix_tokens_est +
+                        diagnosticsTelemetry.cost.lane2_llm_variable_suffix_tokens_est
+                      ).toLocaleString()
+                    : '—'}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center justify-between gap-3">
+              <div className="text-xs text-textMuted">
+                Run ID: <span className="font-mono">{currentRunId ?? '—'}</span>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => downloadReport()}
+                  disabled={!reportMarkdown}
+                  className="px-3 py-1.5 text-xs rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Report
+                </button>
+                <button
+                  onClick={() => downloadPatches()}
+                  disabled={!patchDiff}
+                  className="px-3 py-1.5 text-xs rounded-lg bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Patches
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
 
         {/* Results */}
         {consensus && (
           <section id="results-section" className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <Activity className="w-6 h-6 text-primary" />
-                <h2 className="text-xl font-bold">Analysis Results</h2>
+                <Shield className="w-6 h-6 text-primary" />
+                <h2 className="text-xl font-bold">Issues & Fix Panel</h2>
                 {consensus.veto_triggered && (
                   <span className="px-3 py-1 text-xs rounded-full bg-danger/10 text-danger font-medium">
                     Security Veto
                   </span>
                 )}
               </div>
-              <div className="flex items-center gap-3">
-                <span className="text-sm text-textMuted">
-                  Run ID: <code className="font-mono">{currentRunId}</code>
-                </span>
-                {/* Download Buttons */}
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => downloadReport()}
-                    disabled={!reportMarkdown}
-                    className="px-3 py-1.5 text-xs rounded-lg bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                      <polyline points="7 10 12 15 17 10"/>
-                      <line x1="12" y1="15" x2="12" y2="3"/>
-                    </svg>
-                    Report
-                  </button>
-                  <button
-                    onClick={() => downloadPatches()}
-                    disabled={!patchDiff}
-                    className="px-3 py-1.5 text-xs rounded-lg bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                      <polyline points="7 10 12 15 17 10"/>
-                      <line x1="12" y1="15" x2="12" y2="3"/>
-                    </svg>
-                    Patches
-                  </button>
-                </div>
+              <div className="text-sm text-textMuted">
+                Run ID: <span className="font-mono">{currentRunId}</span>
               </div>
             </div>
 

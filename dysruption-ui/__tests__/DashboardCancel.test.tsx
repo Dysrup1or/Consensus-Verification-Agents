@@ -58,7 +58,7 @@ describe('Dashboard cancel', () => {
     render(<Dashboard />);
 
     fireEvent.click(screen.getByText('SelectPath'));
-    fireEvent.click(screen.getByRole('button', { name: /Start Verification/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Verify Invariant/i }));
 
     const cancel = await screen.findByRole('button', { name: 'Cancel' });
     fireEvent.click(cancel);
@@ -73,7 +73,7 @@ describe('Dashboard cancel', () => {
     render(<Dashboard />);
 
     fireEvent.click(screen.getByText('SelectPath'));
-    fireEvent.click(screen.getByRole('button', { name: /Start Verification/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Verify Invariant/i }));
 
     const cancel = await screen.findByRole('button', { name: 'Cancel' });
     fireEvent.click(cancel);
