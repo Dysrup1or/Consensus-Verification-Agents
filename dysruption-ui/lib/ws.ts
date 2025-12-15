@@ -15,6 +15,7 @@ const isProd = process.env.NODE_ENV === 'production';
 export class CVAWebSocket {
   // CRITICAL: Default to 8001 - must match backend port!
   private baseUrl: string;
+  private wsToken: string | null = null;
   
   private static getDefaultWsUrl(): string {
     // Try environment variable first
@@ -47,19 +48,11 @@ export class CVAWebSocket {
   /**
    * Start WebSocket connection for a specific run.
    */
-  start(runId: string) {
-    // In production we route API calls through authenticated server-side proxies.
-    // Browser WebSockets cannot set auth headers, and we do not want to expose
-    // backend tokens in query params. Use polling fallback instead.
-    if (isProd) {
-      this.runId = runId;
-      this.shouldReconnect = false;
-      this.notifyStatus('disconnected', 'disabled_in_production');
-      return;
-    }
+  start(runId: string, opts?: { wsToken?: string }) {
     this.runId = runId;
     this.shouldReconnect = true;
     this.reconnectAttempts = 0;
+    this.wsToken = opts?.wsToken ?? null;
     this.connect();
   }
 
@@ -78,15 +71,24 @@ export class CVAWebSocket {
   private connect() {
     if (!this.runId) return;
 
-    const url = `${this.baseUrl}/${this.runId}`;
-    console.log(`🌐 [WS] Connecting to: ${url}`);
+    const urlObj = new URL(`${this.baseUrl}/${this.runId}`);
+    if (isProd) {
+      if (!this.wsToken) {
+        this.notifyStatus('disconnected', 'missing_ws_token');
+        return;
+      }
+      urlObj.searchParams.set('ws_token', this.wsToken);
+    }
+
+    // Avoid logging secrets.
+    console.log(`🌐 [WS] Connecting to: ${urlObj.origin}${urlObj.pathname}`);
     this.notifyStatus('connecting');
 
     try {
-      this.ws = new WebSocket(url);
+      this.ws = new WebSocket(urlObj.toString());
 
       this.ws.onopen = () => {
-        console.log(`✅ [WS] Connected to ${url}`);
+        console.log(`✅ [WS] Connected`);
         this.reconnectAttempts = 0;
         this.notifyStatus('connected');
         this.startPing();
@@ -157,6 +159,7 @@ export class CVAWebSocket {
     this.ws?.close();
     this.ws = null;
     this.runId = null;
+    this.wsToken = null;
   }
 
   getConnectionState(): ConnectionStatus {

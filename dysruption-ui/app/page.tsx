@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { signIn, useSession } from 'next-auth/react';
 import { CVAWebSocket, ConnectionStatus } from '@/lib/ws';
 import { startRun, fetchVerdict, fetchRuns, fetchStatus, fetchPrompt, fetchVerdictsPayload, cancelRun } from '@/lib/api';
@@ -23,6 +23,7 @@ import ConstitutionInput from '@/components/ConstitutionInput';
 import PromptRecommendation from '@/components/PromptRecommendation';
 import RunDiagnostics from '@/components/RunDiagnostics';
 import CoverageNotesStrip from '@/components/CoverageNotesStrip';
+import LiveActivity, { LiveActivityEvent } from '@/components/LiveActivity';
 import { 
   Activity, 
   Shield, 
@@ -82,6 +83,20 @@ export default function Dashboard() {
 
   // Options
   const [allowAutoFix, setAllowAutoFix] = useState<boolean>(true);
+
+  const githubInstallUrl = useMemo(() => {
+    const slug = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG;
+    if (!slug || !selectedRepo) return '';
+
+    const payload = {
+      repo_full_name: selectedRepo,
+      default_branch: selectedRef || 'main',
+    };
+
+    const json = JSON.stringify(payload);
+    const base64url = btoa(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    return `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(base64url)}`;
+  }, [selectedRepo, selectedRef]);
   
   // Run management
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
@@ -91,8 +106,41 @@ export default function Dashboard() {
   // Connection state
   const [wsStatus, setWsStatus] = useState<ConnectionStatus>('disconnected');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  const [activityEvents, setActivityEvents] = useState<LiveActivityEvent[]>([]);
   
   const wsRef = useRef<CVAWebSocket | null>(null);
+  const lastActivityMessageRef = useRef<string>('');
+  const pollingNotifiedRef = useRef<string | null>(null);
+
+  const pushActivity = useCallback((kind: LiveActivityEvent['kind'], message: string) => {
+    const ts = Date.now();
+    setActivityEvents((prev) => {
+      const next: LiveActivityEvent[] = [
+        {
+          id: `${ts}-${Math.random().toString(16).slice(2)}`,
+          ts,
+          kind,
+          message,
+        },
+        ...prev,
+      ];
+      return next.slice(0, 60);
+    });
+  }, []);
+
+  const fetchWsTokenForRun = useCallback(async (runId: string): Promise<string | null> => {
+    if (process.env.NODE_ENV !== 'production') return null;
+    try {
+      const res = await fetch(`/api/ws-token?runId=${encodeURIComponent(runId)}`, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const payload = (await res.json().catch(() => null as any)) as any;
+      const token = payload?.ws_token;
+      return typeof token === 'string' && token.length > 0 ? token : null;
+    } catch {
+      return null;
+    }
+  }, []);
 
   const fetchDiagnostics = useCallback(async (runId: string) => {
     try {
@@ -159,6 +207,11 @@ export default function Dashboard() {
       setStatus(data.status);
       setProgress(data.progress);
       setMessage(data.message);
+
+      if (typeof data.message === 'string' && data.message && data.message !== lastActivityMessageRef.current) {
+        lastActivityMessageRef.current = data.message;
+        pushActivity(msg.type === 'progress' ? 'progress' : 'status', data.message);
+      }
     }
     
     if (msg.type === 'verdict') {
@@ -166,6 +219,11 @@ export default function Dashboard() {
       setStatus('complete');
       setProgress(100);
       setMessage(`Analysis complete: ${data.overall_verdict}${data.veto_triggered ? ' (Security Veto)' : ''}`);
+
+      pushActivity(
+        'verdict',
+        `Verdict: ${data.overall_verdict}${data.veto_triggered ? ` (veto: ${data.veto_reason || 'triggered'})` : ''}`
+      );
       
       if (currentRunId) {
         fetchVerdict(currentRunId)
@@ -209,8 +267,9 @@ export default function Dashboard() {
       setStatus('error');
       setMessage(data.error);
       setToastMsg(`Error: ${data.error}`);
+      pushActivity('error', data.error);
     }
-  }, [currentRunId, fetchDiagnostics]);
+  }, [currentRunId, fetchDiagnostics, pushActivity]);
 
   const handleCancelRun = async () => {
     if (!currentRunId) return;
@@ -227,9 +286,11 @@ export default function Dashboard() {
       setPatchDiff(null);
       setPromptData(null);
       setDiagnosticsTelemetry(null);
+      pushActivity('system', 'Run cancelled');
       setToastMsg('Cancelled run');
     } catch (e: any) {
       setToastMsg(`Failed to cancel: ${e.message}`);
+      pushActivity('error', `Cancel failed: ${e.message}`);
     }
   };
 
@@ -381,6 +442,10 @@ export default function Dashboard() {
       setPatchDiff(null);
       setPromptData(null);
       setDiagnosticsTelemetry(null);
+      setActivityEvents([]);
+      lastActivityMessageRef.current = '';
+      pollingNotifiedRef.current = null;
+      pushActivity('system', 'Starting run');
 
       // Pass constitution text if user provided any rules
       const specContent = constitution.trim() || undefined;
@@ -388,6 +453,7 @@ export default function Dashboard() {
       
       setCurrentRunId(resp.run_id);
       setToastMsg(`Verification started`);
+      pushActivity('system', `Run created: ${resp.run_id}`);
       
       if (wsRef.current) wsRef.current.stop();
       const ws = new CVAWebSocket();
@@ -395,8 +461,17 @@ export default function Dashboard() {
       ws.onStatusChange((s, detail) => {
         setWsStatus(s);
         if (s === 'reconnecting') setToastMsg(`Reconnecting: ${detail}`);
+        pushActivity('system', `WebSocket: ${s}${detail ? ` (${detail})` : ''}`);
       });
-      ws.start(resp.run_id);
+
+      if (process.env.NODE_ENV === 'production') {
+        pushActivity('system', 'Requesting WebSocket token');
+      }
+      const wsToken = await fetchWsTokenForRun(resp.run_id);
+      if (process.env.NODE_ENV === 'production' && !wsToken) {
+        pushActivity('system', 'WebSocket token unavailable; using polling fallback');
+      }
+      ws.start(resp.run_id, { wsToken: wsToken ?? undefined });
       wsRef.current = ws;
       
       const runsData = await fetchRuns();
@@ -411,7 +486,14 @@ export default function Dashboard() {
   // Load previous run
   const handleLoadRun = async (runId: string) => {
     try {
+      if (wsRef.current) wsRef.current.stop();
+      setWsStatus('disconnected');
+
       setCurrentRunId(runId);
+      setActivityEvents([]);
+      lastActivityMessageRef.current = '';
+      pollingNotifiedRef.current = null;
+      pushActivity('system', `Loading run: ${runId}`);
       const resp = await fetchVerdict(runId);
       if (resp.ready && resp.consensus) {
         setConsensus(resp.consensus);
@@ -424,6 +506,7 @@ export default function Dashboard() {
         setStatus('complete');
         setProgress(100);
         setMessage(`Loaded run ${runId}`);
+        pushActivity('system', `Loaded completed run: ${runId}`);
         
         // Fetch prompt recommendation if verification failed
         if (resp.consensus.overall_status !== 'pass') {
@@ -435,16 +518,27 @@ export default function Dashboard() {
           setPromptData(null);
         }
       } else {
-        if (wsRef.current) wsRef.current.stop();
         const ws = new CVAWebSocket();
         ws.onMessage(handleWsMessage);
-        ws.onStatusChange((s) => setWsStatus(s));
-        ws.start(runId);
+        ws.onStatusChange((s, detail) => {
+          setWsStatus(s);
+          pushActivity('system', `WebSocket: ${s}${detail ? ` (${detail})` : ''}`);
+        });
+
+        if (process.env.NODE_ENV === 'production') {
+          pushActivity('system', 'Requesting WebSocket token');
+        }
+        const wsToken = await fetchWsTokenForRun(runId);
+        if (process.env.NODE_ENV === 'production' && !wsToken) {
+          pushActivity('system', 'WebSocket token unavailable; using polling fallback');
+        }
+        ws.start(runId, { wsToken: wsToken ?? undefined });
         wsRef.current = ws;
       }
       setShowHistory(false);
     } catch (e: any) {
       setToastMsg(`Failed to load: ${e.message}`);
+      pushActivity('error', `Load failed: ${e.message}`);
     }
   };
 
@@ -534,6 +628,11 @@ export default function Dashboard() {
     if (!currentRunId || !isRunning) return;
     if (wsStatus === 'connected') return; // WS is working, no need to poll
 
+    if (pollingNotifiedRef.current !== currentRunId) {
+      pollingNotifiedRef.current = currentRunId;
+      pushActivity('system', 'Polling for status (WebSocket disconnected)');
+    }
+
     const pollInterval = setInterval(async () => {
       try {
         const statusResp = await fetchStatus(currentRunId);
@@ -541,6 +640,11 @@ export default function Dashboard() {
         
         setProgress(state.progress_percent);
         setMessage(state.message);
+
+        if (state.message && state.message !== lastActivityMessageRef.current) {
+          lastActivityMessageRef.current = state.message;
+          pushActivity('progress', state.message);
+        }
         
         if (state.status === 'complete') {
           setStatus('complete');
@@ -568,6 +672,7 @@ export default function Dashboard() {
               }
             }
             setToastMsg(`Analysis complete: ${state.message}`);
+            pushActivity('verdict', `Complete: ${state.message}`);
           } catch (e) {
             console.error('Failed to fetch verdict:', e);
           }
@@ -575,6 +680,7 @@ export default function Dashboard() {
           setStatus('error');
           clearInterval(pollInterval);
           setToastMsg(`Error: ${state.message}`);
+          pushActivity('error', state.message);
         } else {
           // Map backend status to frontend status
           const statusMap: Record<string, PipelineStatus> = {
@@ -593,7 +699,7 @@ export default function Dashboard() {
     }, 2000); // Poll every 2 seconds
 
     return () => clearInterval(pollInterval);
-  }, [currentRunId, isRunning, wsStatus, fetchDiagnostics]);
+  }, [currentRunId, isRunning, wsStatus, fetchDiagnostics, pushActivity]);
 
   const canStart = hasGitHubToken && selectedRepo && selectedRef && !isRunning;
 
@@ -831,6 +937,31 @@ export default function Dashboard() {
                         ))}
                       </select>
                     </div>
+
+                    <div className="md:col-span-2">
+                      <label className="text-xs text-textMuted uppercase tracking-wider">GitHub App installation</label>
+                      <p className="text-xs text-textMuted mt-1">
+                        Install the GitHub App to enable per-repo access for background monitoring.
+                      </p>
+                      <div className="mt-2">
+                        {githubInstallUrl ? (
+                          <a
+                            href={githubInstallUrl}
+                            className={clsx(
+                              'inline-flex items-center px-3 py-2 rounded-lg bg-primary text-white text-xs font-medium',
+                              'hover:bg-primaryHover transition-colors',
+                              isRunning && 'opacity-50 pointer-events-none'
+                            )}
+                          >
+                            Install Monitoring App
+                          </a>
+                        ) : (
+                          <div className="text-xs text-textMuted">
+                            Set `NEXT_PUBLIC_GITHUB_APP_SLUG` and select a repo.
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 ) : (
                   <p className="text-xs text-textMuted">
@@ -935,6 +1066,8 @@ export default function Dashboard() {
                 </button>
               </div>
             </div>
+
+            <LiveActivity events={activityEvents} />
           </section>
         </div>
 

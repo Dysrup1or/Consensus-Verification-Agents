@@ -21,6 +21,11 @@ python-multipart>=0.0.6
 aiofiles>=23.0.0
 python-dotenv>=1.0.0
 
+# Persistence (PostgreSQL in prod; SQLite in tests/dev)
+SQLAlchemy>=2.0.0
+asyncpg>=0.29.0
+aiosqlite>=0.20.0
+
 # Testing
 pytest>=7.0.0
 pytest-cov>=4.0.0
@@ -35,3 +40,6 @@ tree_sitter_language_pack>=0.5.0
 flask>=3.0.0
 flask-sqlalchemy>=3.1.0
 pyjwt>=2.8.0
+
+# GitHub App auth (RS256 JWT for installation tokens)
+cryptography>=42.0.0

@@ -92,6 +92,58 @@ from .self_heal import SelfHealError
 from .self_heal import config_from_env as self_heal_config_from_env
 from .self_heal import default_verify_command_from_env
 from .self_heal import run_self_heal_patch_loop
+from .persistence.migrations import apply_migrations_if_configured
+from .persistence.init import ensure_sqlite_schema
+from .persistence.config_store import (
+    CreateRepoConnectionInput,
+    create_constitution_version,
+    create_or_get_branch,
+    create_repo_connection,
+    get_latest_constitution,
+    list_branches,
+    list_repo_connections,
+    set_branch_monitoring,
+    get_repo_connection_by_full_name,
+    get_branch_by_name,
+)
+from .monitoring.queue import enqueue_job
+from .monitoring.worker import run_monitor_worker_loop
+from .persistence.run_store import list_runs_for_branch
+
+
+def _ws_jwt_secret() -> str:
+    secret = (os.getenv("CVA_WS_JWT_SECRET") or "").strip()
+    if secret:
+        return secret
+    # Best-effort fallback for dev environments.
+    if API_TOKEN:
+        return API_TOKEN
+    raise RuntimeError("CVA_WS_JWT_SECRET not configured")
+
+
+def _mint_ws_token(*, run_id: str, ttl_seconds: int = 300) -> str:
+    import jwt
+
+    now = int(time.time())
+    payload = {
+        "typ": "cva_ws",
+        "run_id": run_id,
+        "iat": now,
+        "exp": now + int(ttl_seconds),
+    }
+    return jwt.encode(payload, _ws_jwt_secret(), algorithm="HS256")
+
+
+def _verify_ws_token(*, run_id: str, token: str) -> bool:
+    import jwt
+
+    try:
+        payload = jwt.decode(token, _ws_jwt_secret(), algorithms=["HS256"])
+        if payload.get("typ") != "cva_ws":
+            return False
+        return str(payload.get("run_id") or "") == str(run_id)
+    except Exception:
+        return False
 
 # =============================================================================
 # APP INITIALIZATION
@@ -371,6 +423,277 @@ app = FastAPI(
     docs_url="/docs" if not PRODUCTION_MODE else None,  # Disable docs in production
     redoc_url="/redoc" if not PRODUCTION_MODE else None,
 )
+
+
+@app.on_event("startup")
+async def _startup_apply_migrations() -> None:
+    await apply_migrations_if_configured()
+    await ensure_sqlite_schema()
+
+    # Optional continuous monitoring worker (single-process).
+    # Enable with CVA_MONITOR_WORKER=true.
+    try:
+        asyncio.create_task(run_monitor_worker_loop())
+    except Exception:
+        logger.exception("Failed to start monitor worker")
+
+
+# =============================================================================
+# DEV-03 — DB-backed configuration endpoints
+# =============================================================================
+
+
+@app.post("/api/config/repo_connections")
+async def create_repo_connection_endpoint(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    _require_api_token(request)
+
+    provider = _sanitize_str(str(payload.get("provider") or "github"), max_len=32)
+    repo_full_name = _sanitize_str(str(payload.get("repo_full_name") or ""), max_len=512)
+    default_branch = _sanitize_str(str(payload.get("default_branch") or "main"), max_len=256)
+    installation_id = payload.get("installation_id")
+    user_id = payload.get("user_id")
+
+    if provider not in {"github"}:
+        raise HTTPException(status_code=400, detail="Unsupported provider")
+    if not repo_full_name or "/" not in repo_full_name:
+        raise HTTPException(status_code=400, detail="repo_full_name must look like owner/name")
+
+    conn = await create_repo_connection(
+        CreateRepoConnectionInput(
+            provider=provider,
+            repo_full_name=repo_full_name,
+            default_branch=default_branch,
+            installation_id=int(installation_id) if installation_id is not None else None,
+            user_id=_sanitize_str(str(user_id), max_len=64) if user_id else None,
+        )
+    )
+
+    return {
+        "id": conn.id,
+        "user_id": conn.user_id,
+        "provider": conn.provider,
+        "repo_full_name": conn.repo_full_name,
+        "default_branch": conn.default_branch,
+        "installation_id": conn.installation_id,
+        "created_at": conn.created_at.isoformat() if getattr(conn, "created_at", None) else None,
+    }
+
+
+@app.get("/api/config/repo_connections")
+async def list_repo_connections_endpoint(request: Request) -> List[Dict[str, Any]]:
+    _require_api_token(request)
+    conns = await list_repo_connections()
+    return [
+        {
+            "id": c.id,
+            "user_id": c.user_id,
+            "provider": c.provider,
+            "repo_full_name": c.repo_full_name,
+            "default_branch": c.default_branch,
+            "installation_id": c.installation_id,
+            "created_at": c.created_at.isoformat() if getattr(c, "created_at", None) else None,
+        }
+        for c in conns
+    ]
+
+
+@app.post("/api/config/repo_connections/{repo_connection_id}/branches")
+async def create_branch_endpoint(repo_connection_id: str, payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    _require_api_token(request)
+
+    branch = _sanitize_str(str(payload.get("branch") or ""), max_len=256)
+    if not branch:
+        raise HTTPException(status_code=400, detail="branch is required")
+
+    is_monitored = bool(payload.get("is_monitored", True))
+    rb = await create_or_get_branch(repo_connection_id=repo_connection_id, branch=branch, is_monitored=is_monitored)
+    return {
+        "id": rb.id,
+        "repo_connection_id": rb.repo_connection_id,
+        "branch": rb.branch,
+        "is_monitored": rb.is_monitored,
+        "last_seen_sha": rb.last_seen_sha,
+        "created_at": rb.created_at.isoformat() if getattr(rb, "created_at", None) else None,
+    }
+
+
+@app.get("/api/config/repo_connections/{repo_connection_id}/branches")
+async def list_branches_endpoint(repo_connection_id: str, request: Request) -> List[Dict[str, Any]]:
+    _require_api_token(request)
+    branches = await list_branches(repo_connection_id)
+    return [
+        {
+            "id": b.id,
+            "repo_connection_id": b.repo_connection_id,
+            "branch": b.branch,
+            "is_monitored": b.is_monitored,
+            "last_seen_sha": b.last_seen_sha,
+            "created_at": b.created_at.isoformat() if getattr(b, "created_at", None) else None,
+        }
+        for b in branches
+    ]
+
+
+@app.patch("/api/config/repo_branches/{repo_branch_id}")
+async def update_branch_endpoint(repo_branch_id: str, payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    _require_api_token(request)
+    if "is_monitored" not in payload:
+        raise HTTPException(status_code=400, detail="is_monitored is required")
+    try:
+        rb = await set_branch_monitoring(repo_branch_id, bool(payload.get("is_monitored")))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Branch not found")
+    return {
+        "id": rb.id,
+        "repo_connection_id": rb.repo_connection_id,
+        "branch": rb.branch,
+        "is_monitored": rb.is_monitored,
+        "last_seen_sha": rb.last_seen_sha,
+        "created_at": rb.created_at.isoformat() if getattr(rb, "created_at", None) else None,
+    }
+
+
+@app.post("/api/config/repo_branches/{repo_branch_id}/constitution")
+async def create_constitution_endpoint(repo_branch_id: str, payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    _require_api_token(request)
+    content = str(payload.get("content") or "")
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="content is required")
+    cv = await create_constitution_version(repo_branch_id, content)
+    return {
+        "id": cv.id,
+        "repo_branch_id": cv.repo_branch_id,
+        "version": cv.version,
+        "created_at": cv.created_at.isoformat() if getattr(cv, "created_at", None) else None,
+    }
+
+
+@app.get("/api/config/repo_branches/{repo_branch_id}/constitution/latest")
+async def get_latest_constitution_endpoint(repo_branch_id: str, request: Request) -> Dict[str, Any]:
+    _require_api_token(request)
+    cv = await get_latest_constitution(repo_branch_id)
+    if cv is None:
+        raise HTTPException(status_code=404, detail="No constitution found")
+    return {
+        "id": cv.id,
+        "repo_branch_id": cv.repo_branch_id,
+        "version": cv.version,
+        "content": cv.content,
+        "created_at": cv.created_at.isoformat() if getattr(cv, "created_at", None) else None,
+    }
+
+
+# =============================================================================
+# Continuous monitoring — enqueue + GitHub webhook
+# =============================================================================
+
+
+@app.post("/api/monitor/enqueue")
+async def enqueue_monitor_job(payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    _require_api_token(request)
+    repo_branch_id = _sanitize_str(str(payload.get("repo_branch_id") or ""), max_len=64)
+    commit_sha = _sanitize_str(str(payload.get("commit_sha") or ""), max_len=128)
+    event_type = _sanitize_str(str(payload.get("event_type") or "manual"), max_len=64)
+
+    if not repo_branch_id or not commit_sha:
+        raise HTTPException(status_code=400, detail="repo_branch_id and commit_sha are required")
+
+    job = await enqueue_job(repo_branch_id=repo_branch_id, commit_sha=commit_sha, event_type=event_type)
+    return {"job_id": job.id, "status": job.status}
+
+
+@app.get("/api/monitor/runs")
+async def list_monitor_runs(repo_branch_id: str, request: Request, limit: int = 50) -> List[Dict[str, Any]]:
+    _require_api_token(request)
+    repo_branch_id = _sanitize_str(repo_branch_id, max_len=64)
+    runs = await list_runs_for_branch(repo_branch_id, limit=limit)
+    return [
+        {
+            "id": r.id,
+            "repo_branch_id": r.repo_branch_id,
+            "constitution_version_id": r.constitution_version_id,
+            "commit_sha": r.commit_sha,
+            "event_type": r.event_type,
+            "status": r.status,
+            "verdict": r.verdict,
+            "error": r.error,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in runs
+    ]
+
+
+@app.get("/api/ws_token/{run_id}")
+async def get_ws_token(run_id: str, request: Request) -> Dict[str, Any]:
+    """Mint a short-lived ws token scoped to a specific run.
+
+    Intended to be called through the Next.js server proxy so the browser never
+    receives CVA_API_TOKEN.
+    """
+
+    _require_api_token(request)
+    run_id = _sanitize_str(run_id, max_len=128)
+    try:
+        token = _mint_ws_token(run_id=run_id, ttl_seconds=300)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to mint ws token: {exc}")
+    return {"run_id": run_id, "ws_token": token, "expires_in_seconds": 300}
+
+
+def _verify_github_signature(secret: str, body: bytes, signature_256: str) -> bool:
+    import hashlib
+
+    if not signature_256 or not signature_256.startswith("sha256="):
+        return False
+    expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    provided = signature_256.split("=", 1)[1]
+    return hmac.compare_digest(provided, expected)
+
+
+@app.post("/api/webhooks/github")
+async def github_webhook(request: Request) -> Dict[str, Any]:
+    event = request.headers.get("X-GitHub-Event", "")
+    sig = request.headers.get("X-Hub-Signature-256", "")
+    body = await request.body()
+
+    secret = (os.getenv("CVA_GITHUB_WEBHOOK_SECRET") or "").strip()
+    if secret:
+        if not _verify_github_signature(secret, body, sig):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+    else:
+        # In production, fail closed.
+        if PRODUCTION_MODE:
+            raise HTTPException(status_code=500, detail="Server misconfigured: CVA_GITHUB_WEBHOOK_SECRET missing")
+
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    # Only implement push for now.
+    if event != "push":
+        return {"ok": True, "ignored": True, "reason": "unsupported_event", "event": event}
+
+    repo_full_name = (((payload.get("repository") or {}).get("full_name")) or "").strip()
+    ref = (payload.get("ref") or "").strip()  # refs/heads/main
+    after = (payload.get("after") or "").strip()
+    if not repo_full_name or not ref or not after:
+        raise HTTPException(status_code=400, detail="Missing push fields")
+
+    branch_name = ref.split("/", 2)[-1] if ref.startswith("refs/heads/") else ref
+
+    conn = await get_repo_connection_by_full_name(provider="github", repo_full_name=repo_full_name)
+    if conn is None:
+        return {"ok": True, "ignored": True, "reason": "repo_not_connected"}
+
+    branch = await get_branch_by_name(repo_connection_id=conn.id, branch=branch_name)
+    if branch is None or not branch.is_monitored:
+        return {"ok": True, "ignored": True, "reason": "branch_not_monitored"}
+
+    job = await enqueue_job(repo_branch_id=branch.id, commit_sha=after, event_type="push")
+    return {"ok": True, "job_id": job.id, "repo": repo_full_name, "branch": branch_name}
 
 # CORS configuration - restricted in production
 app.add_middleware(
@@ -2062,11 +2385,19 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
     """
     logger.info(f"🔌 [WS] Connection attempt for run_id: {run_id}")
 
-    # In production, require an API token in the query string.
-    # Note: browser WebSocket APIs cannot set custom headers reliably.
+    # In production, require a token in the query string.
+    # Prefer short-lived, run-scoped JWT tokens minted via GET /api/ws_token/{run_id}.
+    # Legacy support: token=<CVA_API_TOKEN>.
     if PRODUCTION_MODE:
-        token = websocket.query_params.get("token", "")
-        if not token or token != (API_TOKEN or ""):
+        ws_token = websocket.query_params.get("ws_token", "")
+        legacy = websocket.query_params.get("token", "")
+        ok = False
+        if ws_token:
+            ok = _verify_ws_token(run_id=run_id, token=ws_token)
+        elif legacy:
+            ok = bool(API_TOKEN) and hmac.compare_digest(legacy, API_TOKEN)
+
+        if not ok:
             try:
                 await websocket.close(code=1008)
             except Exception:
