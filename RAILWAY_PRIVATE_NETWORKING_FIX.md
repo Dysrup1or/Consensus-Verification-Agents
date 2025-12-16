@@ -2,144 +2,105 @@
 
 ## The Problem
 
-Your UI shows `CVA_BACKEND_URL=NOT SET` even though you configured it in Railway.
+Your UI shows `CVA_BACKEND_URL=http://:` which means the reference variables resolved to **empty strings**.
 
-## Root Causes Identified
+## Root Cause
 
-### 1. Missing Reference Variable Syntax
-You're pasting a literal URL instead of using Railway's reference variable system.
-
-### 2. PORT Not Explicitly Defined on Backend
-Railway's `${{service.PORT}}` only resolves to a **manually set PORT variable**, NOT the runtime injected PORT.
-
-### 3. 402 Error = Billing Issue
-A 402 error means Railway credit/payment issue. Check: https://railway.app/account/billing
+Railway's config-as-code **does NOT support the `variables` section**. Variables must be set **directly in the Railway Dashboard**.
 
 ---
 
-## THE FIX: Step-by-Step
+## THE FIX: Step-by-Step (Dashboard Only)
 
-### Step 1: Add PORT Variable to Backend Service
+### Option A: Use Literal Private Domain (FASTEST)
+
+**In Railway Dashboard → Invariant UI → Variables:**
+
+Set `CVA_BACKEND_URL` to this exact literal value:
+```
+http://consensus-verification-agents.railway.internal:8001
+```
+
+> ⚠️ This is the SIMPLEST fix. No reference variables, just the literal domain.
+
+### Option B: Use Reference Variables with Autocomplete
+
+If you want to use reference variables (more maintainable):
+
+1. Go to **Invariant UI → Variables** in Railway Dashboard
+2. Click **"New Variable"**
+3. Name: `CVA_BACKEND_URL`
+4. Value: Start typing `http://${{` 
+5. **Use the autocomplete dropdown** to select your backend service
+6. Complete with `.RAILWAY_PRIVATE_DOMAIN}}:8001`
+
+The autocomplete ensures the service name matches exactly (case-sensitive!).
+
+---
+
+## CRITICAL: Also Add PORT to Backend Service
 
 **In Railway Dashboard → Consensus-Verification-Agents → Variables:**
 
-Add a new variable:
+Add this variable manually:
 ```
 PORT = 8001
 ```
 
-> ⚠️ This is CRITICAL. Without this, reference variables cannot resolve the port.
-
-### Step 2: Set CVA_BACKEND_URL Using Reference Variables
-
-**In Railway Dashboard → Invariant UI → Variables:**
-
-Delete the current `CVA_BACKEND_URL` and add it with this EXACT syntax:
-
-```
-CVA_BACKEND_URL = http://${{Consensus-Verification-Agents.RAILWAY_PRIVATE_DOMAIN}}:${{Consensus-Verification-Agents.PORT}}
-```
-
-> **IMPORTANT:** The service name must match EXACTLY including case and hyphens.
-> Use the autocomplete dropdown in Railway's variable editor to get the correct name.
-
-### Step 3: Verify Backend is Binding Correctly
-
-Your backend's `start.sh` should have:
-```bash
-HOST="::"
-```
-This enables IPv6 binding for Railway's private network.
-
-### Step 4: Deploy Both Services
-
-After making these changes:
-1. Click "Deploy Changes" on the Backend service
-2. Click "Deploy Changes" on the UI service
-3. Wait for both deployments to complete
+This is REQUIRED because:
+- `start.sh` uses `PORT="${PORT:-8001}"` 
+- Railway injects its own PORT but for reference variables you need it set explicitly
 
 ---
 
-## Alternative: Use Public Domain (If Private Networking Continues to Fail)
+## Why Reference Variables Showed Empty
 
-If private networking still doesn't work, use the public domain as a fallback:
+The `http://:` output means both `RAILWAY_PRIVATE_DOMAIN` and `PORT` resolved to empty because:
 
-**In Railway Dashboard → Invariant UI → Variables:**
-```
-CVA_BACKEND_URL = https://invariant-api-production.up.railway.app
-```
-
-This bypasses private networking entirely but works reliably.
+1. **Config-as-code doesn't support variables** - The `railway.json` `variables` section is not a real feature
+2. **Service name mismatch** - Reference syntax is case-sensitive
+3. **Variables not set in Dashboard** - They must be set directly in the UI
 
 ---
 
-## Verification Checklist
+## Verification After Fix
 
-After deployment, check the UI service logs. You should see:
+After setting `CVA_BACKEND_URL` in the Dashboard, redeploy the UI service.
+
+The logs should show:
 ```
 [start.js] CVA_BACKEND_URL=http://consensus-verification-agents.railway.internal:8001
 ```
 
-If you still see `NOT SET`, the reference variable didn't resolve. Check:
-- [ ] Backend service has `PORT=8001` variable set manually
-- [ ] Service name in reference matches exactly (case-sensitive!)
-- [ ] Both services are in the SAME Railway environment
-- [ ] You clicked "Deploy Changes" after adding variables
-
----
-
-## Railway Reference Variable Syntax
-
-| Purpose | Syntax |
-|---------|--------|
-| Reference another service's variable | `${{ServiceName.VAR_NAME}}` |
-| Reference shared variable | `${{shared.VAR_NAME}}` |
-| Reference same service variable | `${{VAR_NAME}}` |
-
-### Common Railway-Provided Variables
-- `RAILWAY_PRIVATE_DOMAIN` - Internal DNS name (e.g., `service.railway.internal`)
-- `RAILWAY_PUBLIC_DOMAIN` - Public domain if generated
-- `PORT` - **Must be set manually for reference variables to work!**
-
----
-
-## 402 Payment Required Error
-
-This is a billing issue, not a networking issue:
-
-1. Go to https://railway.app/account/billing
-2. Add credits or upgrade to Hobby plan ($5/month)
-3. Free tier has limited execution hours
-
----
-
-## Quick Reference: Correct Configuration
-
-### Backend Service (Consensus-Verification-Agents) Variables:
+NOT:
 ```
-PORT = 8001
-CVA_API_TOKEN = your-secure-token-here
-DATABASE_URL = (your database URL)
-```
-
-### UI Service (Invariant UI) Variables:
-```
-CVA_BACKEND_URL = http://${{Consensus-Verification-Agents.RAILWAY_PRIVATE_DOMAIN}}:${{Consensus-Verification-Agents.PORT}}
-CVA_API_TOKEN = (same token as backend)
-NEXTAUTH_URL = https://invariant.dysrupt-ion.com
-NEXTAUTH_SECRET = (your secret)
+[start.js] CVA_BACKEND_URL=http://:
 ```
 
 ---
 
-## Debug Commands (Railway CLI)
+## Fallback: Use Public URL
 
-If you have Railway CLI installed:
-
-```bash
-# See resolved variables for a service
-railway variables --service "Consensus-Verification-Agents"
-
-# Run a command with Railway environment
-railway run --service "Invariant UI" -- node -e "console.log(process.env.CVA_BACKEND_URL)"
+If private networking still fails, use the public domain:
 ```
+CVA_BACKEND_URL=https://invariant-api-production.up.railway.app
+```
+
+---
+
+## Quick Reference: Required Dashboard Variables
+
+### Backend Service (Consensus-Verification-Agents):
+| Variable | Value |
+|----------|-------|
+| `PORT` | `8001` |
+| `CVA_API_TOKEN` | (your secure token) |
+| `DATABASE_URL` | (your database URL) |
+
+### UI Service (Invariant UI):
+| Variable | Value |
+|----------|-------|
+| `CVA_BACKEND_URL` | `http://consensus-verification-agents.railway.internal:8001` |
+| `CVA_API_TOKEN` | (same as backend) |
+| `NEXTAUTH_URL` | `https://invariant.dysrupt-ion.com` |
+| `NEXTAUTH_SECRET` | (your secret) |
