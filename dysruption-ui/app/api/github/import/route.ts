@@ -8,7 +8,14 @@ export const runtime = 'nodejs';
 function resolveBackendBaseUrl(): string {
   const raw = (process.env.CVA_BACKEND_URL || '').trim();
   const fallback = process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8001';
-  let baseUrl = (raw || fallback).replace(/\/$/, '');
+  let baseUrl = (raw || fallback).trim();
+
+  // Common misconfigurations:
+  // - "host:" (accidentally leaving a trailing colon)
+  // - "host:PORT" / "host:$PORT" / "host:${PORT}" (copy/paste placeholders)
+  baseUrl = baseUrl.replace(/\/+$/, '');
+  baseUrl = baseUrl.replace(/:(?:\$\{?PORT\}?|PORT)$/i, '');
+  baseUrl = baseUrl.replace(/:$/, '');
 
   // Accept a bare hostname. Prefer http for Railway private networking.
   if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
@@ -16,9 +23,23 @@ function resolveBackendBaseUrl(): string {
     baseUrl = `${shouldUseHttp ? 'http' : 'https'}://${baseUrl}`;
   }
 
+  // Re-apply trailing-colon cleanup after protocol injection.
+  baseUrl = baseUrl.replace(/:(?:\$\{?PORT\}?|PORT)$/i, '');
+  baseUrl = baseUrl.replace(/:$/, '');
+
   if (!baseUrl) {
     throw new Error(
       'Missing CVA_BACKEND_URL. Set CVA_BACKEND_URL to the CVA backend origin (e.g. https://<api-service-domain>).'
+    );
+  }
+
+  try {
+    // Ensure it is a valid absolute URL.
+    // eslint-disable-next-line no-new
+    new URL(baseUrl);
+  } catch {
+    throw new Error(
+      `Invalid CVA_BACKEND_URL (${baseUrl}). Use a full origin like https://api.example.com or a Railway private domain like http://<service>.railway.internal (no trailing colon).`
     );
   }
 

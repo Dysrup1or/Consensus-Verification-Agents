@@ -5,11 +5,27 @@ export const runtime = 'nodejs';
 function resolveBackendBaseUrl(): { raw: string; resolved: string } {
   const raw = (process.env.CVA_BACKEND_URL || '').trim();
   const fallback = process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8001';
-  let baseUrl = (raw || fallback).replace(/\/$/, '');
+  let baseUrl = (raw || fallback).trim();
+
+  baseUrl = baseUrl.replace(/\/+$/, '');
+  baseUrl = baseUrl.replace(/:(?:\$\{?PORT\}?|PORT)$/i, '');
+  baseUrl = baseUrl.replace(/:$/, '');
 
   if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
     const shouldUseHttp = baseUrl.endsWith('.railway.internal') || !baseUrl.includes('.');
     baseUrl = `${shouldUseHttp ? 'http' : 'https'}://${baseUrl}`;
+  }
+
+  baseUrl = baseUrl.replace(/:(?:\$\{?PORT\}?|PORT)$/i, '');
+  baseUrl = baseUrl.replace(/:$/, '');
+
+  try {
+    if (baseUrl) {
+      // eslint-disable-next-line no-new
+      new URL(baseUrl);
+    }
+  } catch {
+    baseUrl = '';
   }
 
   return { raw, resolved: baseUrl };
