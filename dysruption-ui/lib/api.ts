@@ -12,6 +12,16 @@ import {
 // on the server and allows OAuth-gated access in production.
 const API_BASE = '/api/cva';
 
+export type RepoConnection = {
+  id: string;
+  user_id?: string | null;
+  provider: 'github' | string;
+  repo_full_name: string;
+  default_branch: string;
+  installation_id?: number | null;
+  created_at?: string | null;
+};
+
 /**
  * Start a new verification run.
  */
@@ -103,6 +113,19 @@ export async function fetchRuns(): Promise<RunListResponse> {
   const res = await fetch(`${API_BASE}/runs`);
   if (!res.ok) {
     throw new Error('Failed to fetch runs');
+  }
+  return res.json();
+}
+
+/**
+ * List repo connections persisted in the backend DB.
+ * Used to detect whether a GitHub App installation has been linked.
+ */
+export async function fetchRepoConnections(): Promise<RepoConnection[]> {
+  const res = await fetch(`${API_BASE}/api/config/repo_connections`, { cache: 'no-store' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Failed to fetch repo connections');
   }
   return res.json();
 }

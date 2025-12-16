@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { signIn, signOut, useSession } from 'next-auth/react';
 import { CVAWebSocket, ConnectionStatus } from '@/lib/ws';
-import { startRun, fetchVerdict, fetchRuns, fetchStatus, fetchPrompt, fetchVerdictsPayload, cancelRun } from '@/lib/api';
+import { startRun, fetchVerdict, fetchRuns, fetchStatus, fetchPrompt, fetchVerdictsPayload, cancelRun, fetchRepoConnections } from '@/lib/api';
 import {
   PipelineStatus,
   ConsensusResult,
@@ -102,6 +102,10 @@ export default function Dashboard() {
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [importSummary, setImportSummary] = useState<{ repo: string; ref: string; fileCount: number } | null>(null);
 
+  // GitHub App installation detection (best-effort)
+  const [repoInstallationId, setRepoInstallationId] = useState<number | null>(null);
+  const [isCheckingInstallation, setIsCheckingInstallation] = useState(false);
+
   // Options
   const [allowAutoFix, setAllowAutoFix] = useState<boolean>(true);
 
@@ -118,6 +122,38 @@ export default function Dashboard() {
     const base64url = btoa(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
     return `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(base64url)}`;
   }, [selectedRepo, selectedRef]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function checkInstallation() {
+      if (!selectedRepo) {
+        setRepoInstallationId(null);
+        setIsCheckingInstallation(false);
+        return;
+      }
+
+      setIsCheckingInstallation(true);
+      try {
+        const conns = await fetchRepoConnections();
+        if (cancelled) return;
+
+        const match = conns.find((c) => c.provider === 'github' && c.repo_full_name === selectedRepo);
+        setRepoInstallationId(match?.installation_id ?? null);
+      } catch {
+        if (cancelled) return;
+        setRepoInstallationId(null);
+      } finally {
+        if (cancelled) return;
+        setIsCheckingInstallation(false);
+      }
+    }
+
+    checkInstallation();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRepo]);
   
   // Run management
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
@@ -974,7 +1010,13 @@ export default function Dashboard() {
                         Install the GitHub App to enable per-repo access for background monitoring.
                       </p>
                       <div className="mt-2">
-                        {githubInstallUrl ? (
+                        {isCheckingInstallation ? (
+                          <div className="text-xs text-textMuted">Checking installation…</div>
+                        ) : repoInstallationId ? (
+                          <div className="text-xs text-textSecondary">
+                            Installed (installation_id: <span className="font-mono">{repoInstallationId}</span>)
+                          </div>
+                        ) : githubInstallUrl ? (
                           <a
                             href={githubInstallUrl}
                             className={clsx(
@@ -986,9 +1028,7 @@ export default function Dashboard() {
                             Install Monitoring App
                           </a>
                         ) : (
-                          <div className="text-xs text-textMuted">
-                            Set `NEXT_PUBLIC_GITHUB_APP_SLUG` and select a repo.
-                          </div>
+                          <div className="text-xs text-textMuted">Set `NEXT_PUBLIC_GITHUB_APP_SLUG` and select a repo.</div>
                         )}
                       </div>
                     </div>
