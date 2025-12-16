@@ -50,11 +50,20 @@ export async function GET(req: NextRequest) {
   const { raw, resolved } = resolveBackendBaseUrl();
   const hasToken = typeof process.env.CVA_API_TOKEN === 'string' && process.env.CVA_API_TOKEN.trim().length > 0;
 
+  const build = {
+    railway_commit_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
+    railway_branch: process.env.RAILWAY_GIT_BRANCH || null,
+    railway_environment: process.env.RAILWAY_ENVIRONMENT || null,
+    railway_service: process.env.RAILWAY_SERVICE_NAME || null,
+    node_env: process.env.NODE_ENV || null,
+  };
+
   if (!resolved) {
     return NextResponse.json(
       {
         ok: false,
         error: 'missing_CVA_BACKEND_URL',
+        build,
         env: {
           NODE_ENV: process.env.NODE_ENV || null,
           CVA_BACKEND_URL_present: !!raw,
@@ -70,6 +79,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     ok: true,
+    build,
     env: {
       NODE_ENV: process.env.NODE_ENV || null,
       CVA_BACKEND_URL_raw: raw || null,

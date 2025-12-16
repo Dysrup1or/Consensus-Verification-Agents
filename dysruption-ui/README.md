@@ -136,5 +136,40 @@ Railway deploys the backend and UI as separate services (recommended):
     - `NEXTAUTH_SECRET=...`
     - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
     - `GITHUB_ID` / `GITHUB_SECRET`
-    - `CVA_BACKEND_URL=https://<your-backend-domain>`
+    - `CVA_BACKEND_URL=...` (see “Hard to misconfigure: UI → API wiring”)
     - `CVA_API_TOKEN=...` (same token as backend)
+
+## Hard to misconfigure: UI → API wiring
+
+### 1) Use Railway service-to-service variable injection (recommended)
+
+Goal: **avoid hand-typed hostnames** like `consensus-verification-agents.railway.internal`.
+
+In Railway:
+- Ensure you have two services in the same project:
+  - Backend service (FastAPI)
+  - UI service (Next.js)
+- On the **UI service** → **Variables**:
+  1. Click **New Variable** → **Reference** (or “Add Reference”).
+  2. Pick the **Backend service** as the source.
+  3. Select the backend’s `RAILWAY_PRIVATE_DOMAIN`.
+  4. Name the resulting variable something obvious like `BACKEND_PRIVATE_DOMAIN`.
+  5. Set `CVA_BACKEND_URL` to: `http://${BACKEND_PRIVATE_DOMAIN}`
+
+Notes:
+- Use `http://` for `*.railway.internal` private domains.
+- Do **not** include a port (Railway private domain routes to the service port).
+
+### 2) Add a deploy-time smoke check (fail fast)
+
+This repo includes a GitHub Actions workflow that calls the UI’s diagnostics endpoint and fails the build if the UI cannot reach the backend:
+- Workflow: `.github/workflows/ui-backend-smoke.yml`
+
+Setup:
+- In GitHub repo settings → **Secrets and variables** → **Actions** → **New repository secret**:
+  - `UI_BASE_URL` = your deployed UI origin, e.g. `https://<your-ui-domain>`
+
+What it checks:
+- `GET /api/backend/diagnostics` on the UI service
+- Ensures the probe to the backend root (`/`) is OK
+- Prints the UI build identifiers so you can confirm the deployed commit

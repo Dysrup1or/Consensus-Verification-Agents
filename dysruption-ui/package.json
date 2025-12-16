@@ -8,7 +8,8 @@
     "build:cf": "next build",
     "start": "node scripts/start.js",
     "lint": "next lint",
-    "test": "jest"
+    "test": "jest",
+    "smoke:backend": "node scripts/smoke-backend.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.0",
