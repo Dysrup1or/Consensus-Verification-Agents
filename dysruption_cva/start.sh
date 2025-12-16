@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Force PORT to 8001 for consistency with UI configuration.
-# Railway injects its own PORT, but we override it to ensure predictable networking.
-# The UI is configured to connect to port 8001, so the backend MUST use 8001.
-PORT="8001"
+# Use Railway's injected PORT (required for public networking).
+# Railway's proxy expects the app to listen on the injected PORT.
+# If we override it, Railway can't route traffic and kills the container.
+#
+# To set a consistent port:
+# 1. Add PORT=8001 as a service variable in Railway Dashboard for the backend
+# 2. Set CVA_BACKEND_URL=http://<backend>.railway.internal:8001 in the UI
+#
+# If PORT is not set, default to 8001 for local development.
+PORT="${PORT:-8001}"
 
 # Use 0.0.0.0 for IPv4 binding (works reliably with Uvicorn CLI).
-# For Railway private networking:
-# - New environments (after Oct 2025): Support IPv4, so 0.0.0.0 works
-# - Legacy environments (IPv6-only): Railway's network layer handles translation
-# The empty string host "" doesn't work properly with Uvicorn CLI.
 HOST="0.0.0.0"
 
 echo "[start.sh] Starting CVA API on ${HOST}:${PORT}"
