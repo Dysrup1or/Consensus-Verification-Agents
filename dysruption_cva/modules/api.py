@@ -18,6 +18,19 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Railway startup diagnostics
+print("[CVA] ========== STARTUP DIAGNOSTICS ==========")
+print(f"[CVA] PORT={os.environ.get('PORT', 'NOT SET')}")
+print(f"[CVA] HOST={os.environ.get('HOST', 'NOT SET')}")
+print(f"[CVA] RAILWAY_ENVIRONMENT={os.environ.get('RAILWAY_ENVIRONMENT', 'NOT SET')}")
+print(f"[CVA] CVA_PRODUCTION={os.environ.get('CVA_PRODUCTION', 'NOT SET')}")
+print(f"[CVA] CVA_API_TOKEN={'SET' if os.environ.get('CVA_API_TOKEN') else 'NOT SET'}")
+print(f"[CVA] DATABASE_URL={'SET' if os.environ.get('DATABASE_URL') else 'NOT SET'}")
+print(f"[CVA] GOOGLE_API_KEY={'SET' if os.environ.get('GOOGLE_API_KEY') else 'NOT SET'}")
+print(f"[CVA] OPENAI_API_KEY={'SET' if os.environ.get('OPENAI_API_KEY') else 'NOT SET'}")
+print(f"[CVA] ANTHROPIC_API_KEY={'SET' if os.environ.get('ANTHROPIC_API_KEY') else 'NOT SET'}")
+print("[CVA] ============================================")
+
 # Find the .env file (in the project root, same level as modules/)
 env_path = Path(__file__).parent.parent / ".env"
 if env_path.exists():

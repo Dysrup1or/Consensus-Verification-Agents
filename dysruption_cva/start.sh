@@ -5,14 +5,13 @@ set -euo pipefail
 PORT="${PORT:-8001}"
 
 # Bind host:
-# - On Railway private networking, service DNS may resolve to IPv6.
-#   Default to IPv6 ("::") so the server is reachable via .railway.internal.
-# - Locally, default to IPv4 ("0.0.0.0").
-if [[ -n "${RAILWAY_ENVIRONMENT:-}" ]]; then
-	HOST="${HOST:-::}"
-else
-	HOST="${HOST:-0.0.0.0}"
-fi
+# - Railway requires binding to 0.0.0.0 for both public and private networking.
+# - IPv6 (::) can cause issues with some Railway configurations.
+# - Always use 0.0.0.0 to ensure the service is reachable.
+HOST="${HOST:-0.0.0.0}"
+
+echo "[start.sh] Starting CVA API on ${HOST}:${PORT}"
+echo "[start.sh] RAILWAY_ENVIRONMENT=${RAILWAY_ENVIRONMENT:-not_set}"
 
 # Run the CVA FastAPI server.
 exec python -m uvicorn modules.api:app --host "${HOST}" --port "${PORT}"
