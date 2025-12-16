@@ -115,7 +115,9 @@ export default async function GitHubSetupPage(props: {
 
       result = payload;
     } catch (e: any) {
-      error = e?.message || 'Failed to link installation.';
+      const message = e?.message || 'Failed to link installation.';
+      const cause = e?.cause?.message || e?.cause?.code || e?.cause;
+      error = cause ? `${message} (cause: ${String(cause)})` : message;
     }
   }
 
@@ -142,6 +144,10 @@ export default async function GitHubSetupPage(props: {
               User:{' '}
               <span className="font-mono text-textPrimary">{user_id}</span>
             </div>
+            <div>
+              Backend:{' '}
+              <span className="font-mono text-textPrimary">{backendUrl || '—'}</span>
+            </div>
           </div>
 
           {error ? (
@@ -161,6 +167,13 @@ export default async function GitHubSetupPage(props: {
             className="inline-block mt-4 px-4 py-2 rounded-lg border border-border bg-bg text-textPrimary font-medium hover:border-primary/50 transition-colors"
           >
             Back to dashboard
+          </a>
+
+          <a
+            href="/api/auth/signout?callbackUrl=/login"
+            className="inline-block mt-3 px-4 py-2 rounded-lg bg-surface border border-border text-textPrimary font-medium hover:border-primary/50 transition-colors"
+          >
+            Sign out
           </a>
         </div>
       </div>

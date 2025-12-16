@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { signIn, useSession } from 'next-auth/react';
+import { signIn, signOut, useSession } from 'next-auth/react';
 import { CVAWebSocket, ConnectionStatus } from '@/lib/ws';
 import { startRun, fetchVerdict, fetchRuns, fetchStatus, fetchPrompt, fetchVerdictsPayload, cancelRun } from '@/lib/api';
 import {
@@ -756,6 +756,15 @@ export default function Dashboard() {
                    '⏳ Analyzing...'}
                 </span>
               </div>
+
+              {session ? (
+                <button
+                  onClick={() => signOut({ callbackUrl: '/login' })}
+                  className="px-3 py-1.5 rounded-lg border border-border bg-surface text-sm hover:border-primary/50 transition-colors"
+                >
+                  Sign out
+                </button>
+              ) : null}
 
               <button
                 onClick={() => setShowHistory(!showHistory)}

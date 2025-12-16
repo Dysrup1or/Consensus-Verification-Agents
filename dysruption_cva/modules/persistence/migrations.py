@@ -20,12 +20,35 @@ class Migration:
 
 
 def _project_root() -> Path:
-    # .../dysruption_cva/modules/persistence/migrations.py -> .../dysruption_cva -> project root
-    return Path(__file__).resolve().parents[3]
+    # NOTE:
+    # - Local dev path often looks like: <repo>/dysruption_cva/modules/persistence/migrations.py
+    # - Railway may set the service root to dysruption_cva, so the path is: /app/modules/persistence/migrations.py
+    # A fixed parents[N] assumption breaks in the Railway layout.
+    return Path(__file__).resolve().parent
 
 
 def _migrations_dir() -> Path:
-    return _project_root() / "db" / "migrations"
+    configured = (os.getenv("CVA_MIGRATIONS_DIR") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    here = Path(__file__).resolve()
+
+    # Prefer migrations shipped alongside the backend service (works when Railway root is dysruption_cva).
+    # <service-root>/modules/persistence/migrations.py -> <service-root>/db/migrations
+    service_root = here.parents[2] if len(here.parents) >= 3 else here.parent
+    candidate = (service_root / "db" / "migrations").resolve()
+    if candidate.exists():
+        return candidate
+
+    # Fallback: search upwards for a repo-root db/migrations.
+    for parent in here.parents:
+        candidate = (parent / "db" / "migrations").resolve()
+        if candidate.exists():
+            return candidate
+
+    # Last resort: return the service-root candidate path (will log as missing).
+    return (service_root / "db" / "migrations").resolve()
 
 
 _FILENAME_RE = re.compile(r"^(?P<version>\d{3,})_(?P<name>.+)\.sql$")
@@ -66,7 +89,7 @@ def _split_sql(sql: str) -> Iterable[str]:
 async def apply_migrations() -> int:
     migrations = _list_migrations()
     if not migrations:
-        logger.info("No migrations found")
+        logger.info(f"No migrations found (dir={_migrations_dir()})")
         return 0
 
     engine = get_engine()
