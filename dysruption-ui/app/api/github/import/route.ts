@@ -7,14 +7,15 @@ export const runtime = 'nodejs';
 
 function resolveBackendBaseUrl(): string {
   const raw = (process.env.CVA_BACKEND_URL || '').trim();
+  const backendPort = (process.env.CVA_BACKEND_PORT || '').trim();
   const fallback = process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8001';
   let baseUrl = (raw || fallback).trim();
 
-  // Common misconfigurations:
-  // - "host:" (accidentally leaving a trailing colon)
-  // - "host:PORT" / "host:$PORT" / "host:${PORT}" (copy/paste placeholders)
+  // Remove trailing slashes
   baseUrl = baseUrl.replace(/\/+$/, '');
-  baseUrl = baseUrl.replace(/:(?:\$\{?PORT\}?|PORT)$/i, '');
+  
+  // Remove literal "${PORT}" or ":PORT" placeholders (not actual port numbers)
+  baseUrl = baseUrl.replace(/:(?:\$\{?PORT\}?)$/i, '');
   baseUrl = baseUrl.replace(/:$/, '');
 
   // Accept a bare hostname. Prefer http for Railway private networking.
@@ -23,9 +24,20 @@ function resolveBackendBaseUrl(): string {
     baseUrl = `${shouldUseHttp ? 'http' : 'https'}://${baseUrl}`;
   }
 
-  // Re-apply trailing-colon cleanup after protocol injection.
-  baseUrl = baseUrl.replace(/:(?:\$\{?PORT\}?|PORT)$/i, '');
-  baseUrl = baseUrl.replace(/:$/, '');
+  // For Railway internal domains, append port if not already present and we have one
+  // This is CRITICAL: Railway private networking REQUIRES explicit port specification
+  // https://docs.railway.com/guides/private-networking#use-internal-hostname-and-port
+  if (baseUrl.includes('.railway.internal')) {
+    try {
+      const url = new URL(baseUrl);
+      if (!url.port && backendPort) {
+        url.port = backendPort;
+        baseUrl = url.toString().replace(/\/$/, '');
+      }
+    } catch {
+      // URL parsing failed, will be caught below
+    }
+  }
 
   if (!baseUrl) {
     throw new Error(
@@ -39,7 +51,7 @@ function resolveBackendBaseUrl(): string {
     new URL(baseUrl);
   } catch {
     throw new Error(
-      `Invalid CVA_BACKEND_URL (${baseUrl}). Use a full origin like https://api.example.com or a Railway private domain like http://<service>.railway.internal (no trailing colon).`
+      `Invalid CVA_BACKEND_URL (${baseUrl}). Use a full origin like https://api.example.com or a Railway private domain like http://<service>.railway.internal:PORT (port required for private networking).`
     );
   }
 

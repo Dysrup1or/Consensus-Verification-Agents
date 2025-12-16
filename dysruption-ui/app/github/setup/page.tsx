@@ -11,11 +11,26 @@ function decodeBase64Url(input: string): string {
 
 function resolveBackendBaseUrl(): string {
   const raw = (process.env.CVA_BACKEND_URL || '').trim();
+  const backendPort = (process.env.CVA_BACKEND_PORT || '').trim();
   let baseUrl = raw.replace(/\/$/, '');
 
   if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
     const shouldUseHttp = baseUrl.endsWith('.railway.internal') || !baseUrl.includes('.');
     baseUrl = `${shouldUseHttp ? 'http' : 'https'}://${baseUrl}`;
+  }
+
+  // For Railway internal domains, append port if not already present and we have one
+  // This is CRITICAL: Railway private networking REQUIRES explicit port specification
+  if (baseUrl.includes('.railway.internal')) {
+    try {
+      const url = new URL(baseUrl);
+      if (!url.port && backendPort) {
+        url.port = backendPort;
+        baseUrl = url.toString().replace(/\/$/, '');
+      }
+    } catch {
+      // URL parsing failed
+    }
   }
 
   return baseUrl;
