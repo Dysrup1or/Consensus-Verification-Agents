@@ -436,6 +436,9 @@ async def _startup_apply_migrations() -> None:
         monitor_enabled = os.getenv("CVA_MONITOR_WORKER", "false").lower() == "true"
         apply_migrations_enabled = os.getenv("CVA_APPLY_MIGRATIONS", "false").lower() == "true"
 
+        if not monitor_enabled:
+            return
+
         # Guard: on Postgres, the monitor worker requires SQL migrations (monitor_jobs, etc.).
         # If migrations aren't enabled, skip starting the worker rather than crash-looping.
         try:

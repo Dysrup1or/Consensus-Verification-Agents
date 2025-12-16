@@ -45,6 +45,27 @@ type GitHubBranchListItem = {
   protected: boolean;
 };
 
+function normalizeGitHubAppSlug(raw: string | undefined): string {
+  const value = (raw || '').trim();
+  if (!value) return '';
+
+  // Accept either a plain slug ("invariant-monitoring") or a pasted URL/path.
+  // Examples:
+  // - https://github.com/apps/invariant-monitoring
+  // - https://github.com/apps/invariant-monitoring/installations/new
+  // - /apps/invariant-monitoring
+  const patterns = [
+    /github\.com\/apps\/([^\/\?]+)/i,
+    /\/apps\/([^\/\?]+)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+    if (match && match[1]) return match[1];
+  }
+
+  return value;
+}
+
 export default function Dashboard() {
   const { data: session } = useSession();
   const hasGitHubToken = Boolean((session as any)?.githubAccessToken);
@@ -85,7 +106,7 @@ export default function Dashboard() {
   const [allowAutoFix, setAllowAutoFix] = useState<boolean>(true);
 
   const githubInstallUrl = useMemo(() => {
-    const slug = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG;
+    const slug = normalizeGitHubAppSlug(process.env.NEXT_PUBLIC_GITHUB_APP_SLUG);
     if (!slug || !selectedRepo) return '';
 
     const payload = {
