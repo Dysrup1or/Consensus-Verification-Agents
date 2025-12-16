@@ -153,125 +153,142 @@ async function uploadBatchToBackend(args: {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await getServerSession(authOptions);
-  const token = getGitHubAccessToken(session);
+  try {
+    const session = await getServerSession(authOptions);
+    const token = getGitHubAccessToken(session);
 
-  if (!session || !token) {
-    return NextResponse.json({ error: 'github_auth_required' }, { status: 401 });
-  }
-
-  const body = (await req.json().catch(() => null)) as null | { repo: string; ref?: string };
-  const repo = body?.repo || '';
-  const ref = (body?.ref || '').trim() || 'HEAD';
-
-  if (!isValidRepoFullName(repo)) {
-    return NextResponse.json({ error: 'invalid_repo' }, { status: 400 });
-  }
-
-  // Download zipball
-  const zipResp = await fetch(`https://api.github.com/repos/${repo}/zipball/${encodeURIComponent(ref)}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      'User-Agent': 'invariant-ui',
-    },
-    cache: 'no-store',
-  });
-
-  if (!zipResp.ok || !zipResp.body) {
-    const text = await zipResp.text().catch(() => '');
-    return NextResponse.json(
-      { error: 'github_zipball_error', status: zipResp.status, detail: text.slice(0, 500) },
-      { status: 502 }
-    );
-  }
-
-  // Lazy-load unzipper's parser only (avoids optional deps from the package entrypoint).
-  const parseMod = (await import('unzipper/lib/parse')) as any;
-  const Parse = parseMod?.default ?? parseMod;
-
-  // Limits (strict safety)
-  const MAX_FILES = 2500;
-  const MAX_TOTAL_BYTES = 50 * 1024 * 1024; // 50MB
-  const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2MB per file
-  const BATCH_SIZE = 50;
-
-  let totalBytes = 0;
-  let uploadedTotal = 0;
-  let uploadId: string | null = null;
-  let targetPath = '';
-
-  const batch: Array<{ relPath: string; content: Uint8Array }> = [];
-
-  const nodeStream = Readable.fromWeb(zipResp.body as any);
-  const parser = nodeStream.pipe(Parse({ forceStream: true }));
-
-  for await (const entry of parser) {
-    const entryPath: string = entry.path || '';
-    const isDirectory: boolean = entry.type === 'Directory' || entryPath.endsWith('/');
-
-    if (isDirectory) {
-      entry.autodrain();
-      continue;
+    if (!session || !token) {
+      return NextResponse.json({ error: 'github_auth_required' }, { status: 401 });
     }
 
-    if (uploadedTotal >= MAX_FILES) {
-      entry.autodrain();
-      break;
+    const body = (await req.json().catch(() => null)) as null | { repo: string; ref?: string };
+    const repo = body?.repo || '';
+    const ref = (body?.ref || '').trim() || 'HEAD';
+
+    if (!isValidRepoFullName(repo)) {
+      return NextResponse.json({ error: 'invalid_repo' }, { status: 400 });
     }
 
-    let relPath = sanitizeRelativePath(stripZipballRootPrefix(entryPath));
-    if (shouldSkipPath(relPath) || looksBinaryByExtension(relPath)) {
-      entry.autodrain();
-      continue;
+    // Download zipball
+    const zipResp = await fetch(`https://api.github.com/repos/${repo}/zipball/${encodeURIComponent(ref)}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'invariant-ui',
+      },
+      cache: 'no-store',
+    });
+
+    if (!zipResp.ok || !zipResp.body) {
+      const text = await zipResp.text().catch(() => '');
+      return NextResponse.json(
+        { error: 'github_zipball_error', status: zipResp.status, detail: text.slice(0, 500) },
+        { status: 502 }
+      );
     }
 
-    const chunks: Buffer[] = [];
-    let fileBytes = 0;
+    // Lazy-load unzipper's parser only (avoids optional deps from the package entrypoint).
+    const parseMod = (await import('unzipper/lib/parse')) as any;
+    const Parse = parseMod?.default ?? parseMod;
 
-    for await (const chunk of entry) {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      fileBytes += buf.length;
-      totalBytes += buf.length;
+    // Limits (strict safety)
+    const MAX_FILES = 2500;
+    const MAX_TOTAL_BYTES = 50 * 1024 * 1024; // 50MB
+    const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2MB per file
+    const BATCH_SIZE = 50;
 
-      if (fileBytes > MAX_FILE_BYTES || totalBytes > MAX_TOTAL_BYTES) {
-        // Stop reading this file and drop it.
-        chunks.length = 0;
+    let totalBytes = 0;
+    let uploadedTotal = 0;
+    let uploadId: string | null = null;
+    let targetPath = '';
+
+    const batch: Array<{ relPath: string; content: Uint8Array }> = [];
+
+    const nodeStream = Readable.fromWeb(zipResp.body as any);
+    const parser = nodeStream.pipe(Parse({ forceStream: true }));
+
+    for await (const entry of parser) {
+      const entryPath: string = entry.path || '';
+      const isDirectory: boolean = entry.type === 'Directory' || entryPath.endsWith('/');
+
+      if (isDirectory) {
+        entry.autodrain();
+        continue;
+      }
+
+      if (uploadedTotal >= MAX_FILES) {
+        entry.autodrain();
         break;
       }
 
-      chunks.push(buf);
+      let relPath = sanitizeRelativePath(stripZipballRootPrefix(entryPath));
+      if (shouldSkipPath(relPath) || looksBinaryByExtension(relPath)) {
+        entry.autodrain();
+        continue;
+      }
+
+      const chunks: Buffer[] = [];
+      let fileBytes = 0;
+
+      for await (const chunk of entry) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        fileBytes += buf.length;
+        totalBytes += buf.length;
+
+        if (fileBytes > MAX_FILE_BYTES || totalBytes > MAX_TOTAL_BYTES) {
+          // Stop reading this file and drop it.
+          chunks.length = 0;
+          break;
+        }
+
+        chunks.push(buf);
+      }
+
+      if (chunks.length === 0) {
+        continue;
+      }
+
+      const content = Buffer.concat(chunks);
+      batch.push({ relPath, content });
+
+      if (batch.length >= BATCH_SIZE) {
+        const uploaded = await uploadBatchToBackend({ files: batch.splice(0, batch.length), uploadId });
+        uploadId = uploaded.upload_id;
+        targetPath = uploaded.path;
+        uploadedTotal += uploaded.count;
+      }
     }
 
-    if (chunks.length === 0) {
-      continue;
-    }
-
-    const content = Buffer.concat(chunks);
-    batch.push({ relPath, content });
-
-    if (batch.length >= BATCH_SIZE) {
-      const uploaded = await uploadBatchToBackend({ files: batch.splice(0, batch.length), uploadId });
+    if (batch.length > 0) {
+      const uploaded = await uploadBatchToBackend({ files: batch, uploadId });
       uploadId = uploaded.upload_id;
       targetPath = uploaded.path;
       uploadedTotal += uploaded.count;
     }
-  }
 
-  if (batch.length > 0) {
-    const uploaded = await uploadBatchToBackend({ files: batch, uploadId });
-    uploadId = uploaded.upload_id;
-    targetPath = uploaded.path;
-    uploadedTotal += uploaded.count;
-  }
+    if (!targetPath) {
+      return NextResponse.json(
+        { error: 'no_files_imported', detail: 'No eligible source files were imported from the selected repo.' },
+        { status: 400 }
+      );
+    }
 
-  if (!targetPath) {
+    return NextResponse.json({ targetPath, fileCount: uploadedTotal, repo, ref });
+  } catch (err: any) {
+    const message = err?.message || String(err);
+    const hint =
+      message.includes('.railway.internal') && /ECONNREFUSED/i.test(message)
+        ? 'On Railway: verify CVA_BACKEND_URL points to the *backend service* private domain (not the project). If the error shows an IPv6 address, also set HOST=:: on the backend service so Uvicorn listens on IPv6.'
+        : undefined;
+
     return NextResponse.json(
-      { error: 'no_files_imported', detail: 'No eligible source files were imported from the selected repo.' },
-      { status: 400 }
+      {
+        error: 'github_import_failed',
+        detail: message,
+        hint,
+      },
+      { status: 502 }
     );
   }
-
-  return NextResponse.json({ targetPath, fileCount: uploadedTotal, repo, ref });
 }

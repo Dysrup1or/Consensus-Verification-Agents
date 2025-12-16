@@ -127,7 +127,7 @@ export default function Dashboard() {
     let cancelled = false;
 
     async function checkInstallation() {
-      if (!selectedRepo) {
+      if (!hasGitHubToken || !selectedRepo) {
         setRepoInstallationId(null);
         setIsCheckingInstallation(false);
         return;
@@ -139,7 +139,22 @@ export default function Dashboard() {
         if (cancelled) return;
 
         const match = conns.find((c) => c.provider === 'github' && c.repo_full_name === selectedRepo);
-        setRepoInstallationId(match?.installation_id ?? null);
+        if (match?.installation_id) {
+          setRepoInstallationId(match.installation_id);
+          return;
+        }
+
+        // Fallback: detect installation via GitHub API even if the backend is unreachable.
+        const instResp = await fetch(`/api/github/installations?repo=${encodeURIComponent(selectedRepo)}`, {
+          cache: 'no-store',
+        });
+        if (!instResp.ok) {
+          setRepoInstallationId(null);
+          return;
+        }
+        const payload = (await instResp.json().catch(() => null as any)) as any;
+        const installationId = payload?.installation_id;
+        setRepoInstallationId(typeof installationId === 'number' && installationId > 0 ? installationId : null);
       } catch {
         if (cancelled) return;
         setRepoInstallationId(null);
@@ -153,7 +168,7 @@ export default function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, [selectedRepo]);
+  }, [hasGitHubToken, selectedRepo]);
   
   // Run management
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
@@ -1013,9 +1028,15 @@ export default function Dashboard() {
                         {isCheckingInstallation ? (
                           <div className="text-xs text-textMuted">Checking installation…</div>
                         ) : repoInstallationId ? (
-                          <div className="text-xs text-textSecondary">
-                            Installed (installation_id: <span className="font-mono">{repoInstallationId}</span>)
-                          </div>
+                          <button
+                            type="button"
+                            aria-pressed={true}
+                            disabled
+                            className="inline-flex items-center px-3 py-2 rounded-lg bg-surface border border-border text-xs font-medium text-textSecondary opacity-90 cursor-default"
+                            title={`Installed (installation_id: ${repoInstallationId})`}
+                          >
+                            Monitoring App installed
+                          </button>
                         ) : githubInstallUrl ? (
                           <a
                             href={githubInstallUrl}

@@ -1,5 +1,6 @@
 import { getServerSession } from 'next-auth/next';
 import { authOptions } from '@/lib/auth';
+import { redirect } from 'next/navigation';
 
 function decodeBase64Url(input: string): string {
   const normalized = input.replace(/-/g, '+').replace(/_/g, '/');
@@ -119,6 +120,10 @@ export default async function GitHubSetupPage(props: {
       const cause = e?.cause?.message || e?.cause?.code || e?.cause;
       error = cause ? `${message} (cause: ${String(cause)})` : message;
     }
+  }
+
+  if (!error && result) {
+    redirect('/');
   }
 
   return (
