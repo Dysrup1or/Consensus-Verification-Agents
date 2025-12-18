@@ -1,0 +1,343 @@
+{
+  "name": "cva-verifier",
+  "displayName": "CVA - AI Code Verifier",
+  "description": "Verify code against constitutional specifications using AI judges with consensus voting",
+  "version": "0.1.0",
+  "publisher": "dysruption",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dysruption/cva-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Testing",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "verification",
+    "consensus",
+    "tribunal",
+    "code quality",
+    "linting",
+    "vibecheck"
+  ],
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "workspaceContains:**/*.cva.yaml",
+    "workspaceContains:**/spec.txt"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cva.start",
+        "title": "CVA: Start Backend",
+        "icon": "$(play)"
+      },
+      {
+        "command": "cva.stop",
+        "title": "CVA: Stop Backend",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "cva.restart",
+        "title": "CVA: Restart Backend",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "cva.verify",
+        "title": "CVA: Verify Workspace",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "cva.verifyFile",
+        "title": "CVA: Verify Current File",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "cva.showOutput",
+        "title": "CVA: Show Output",
+        "icon": "$(output)"
+      },
+      {
+        "command": "cva.clearDiagnostics",
+        "title": "CVA: Clear Diagnostics",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "cva.openDocs",
+        "title": "CVA: Open Backend Docs",
+        "icon": "$(book)"
+      },
+      {
+        "command": "cva.selectBackendPath",
+        "title": "CVA: Select Backend Path",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "cva.selectPythonPath",
+        "title": "CVA: Select Python Interpreter",
+        "icon": "$(symbol-misc)"
+      },
+      {
+        "command": "cva.showStatus",
+        "title": "CVA: Show Status",
+        "icon": "$(info)"
+      },
+      {
+        "command": "cva.createSpec",
+        "title": "CVA: Create Constitution (spec.txt)",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "cva.openWalkthrough",
+        "title": "CVA: Open Getting Started Guide",
+        "icon": "$(question)"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "cvaVerdicts",
+          "name": "CVA Verdicts",
+          "icon": "$(law)",
+          "contextualTitle": "CVA Verification Results"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "cvaVerdicts",
+        "contents": "No verification has been run yet.\n[Run Verification](command:cva.verify)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "cva.verify",
+          "when": "view == cvaVerdicts",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "cva.verifyFile",
+          "when": "editorTextFocus",
+          "group": "cva@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "cva.start"
+        },
+        {
+          "command": "cva.stop"
+        },
+        {
+          "command": "cva.verify"
+        },
+        {
+          "command": "cva.verifyFile"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CVA Verifier",
+      "properties": {
+        "cva.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable CVA file watching and verification"
+        },
+        "cva.debounceMs": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 500,
+          "maximum": 30000,
+          "description": "Milliseconds to wait after last file change before triggering verification"
+        },
+        "cva.backendPort": {
+          "type": "number",
+          "default": 8001,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Port number for the CVA backend server"
+        },
+        "cva.autoStartBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the CVA backend when the extension activates"
+        },
+        "cva.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python interpreter (e.g., 'python3', '/usr/bin/python3', or full path)"
+        },
+        "cva.cvaBackendPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to CVA backend directory. Leave empty to use bundled backend."
+        },
+        "cva.constitutionPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to constitution/spec file. Leave empty to auto-detect spec.txt"
+        },
+        "cva.watchPatterns": {
+          "type": "array",
+          "default": [
+            "**/*.py",
+            "**/*.js",
+            "**/*.ts",
+            "**/*.jsx",
+            "**/*.tsx",
+            "**/*.java",
+            "**/*.go",
+            "**/*.rs"
+          ],
+          "description": "Glob patterns for files to watch for changes"
+        },
+        "cva.ignorePatterns": {
+          "type": "array",
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/__pycache__/**",
+            "**/.venv/**",
+            "**/venv/**",
+            "**/dist/**",
+            "**/build/**",
+            "**/out/**",
+            "**/.next/**"
+          ],
+          "description": "Glob patterns for files/directories to ignore"
+        },
+        "cva.showInlineHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline diagnostic hints for violations"
+        },
+        "cva.autoVerifyOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically trigger verification when files are saved"
+        },
+        "cva.maxRestartAttempts": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Maximum number of backend restart attempts on crash"
+        },
+        "cva.healthCheckIntervalMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 5000,
+          "maximum": 300000,
+          "description": "Interval for backend health checks in milliseconds"
+        },
+        "cva.useCloudBackend": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use Invariant cloud backend instead of local. Requires cloud API token.",
+          "markdownDescription": "Use **Invariant Cloud** backend instead of running locally.\n\nBenefits:\n- No Python setup required\n- Always up-to-date\n- Team analytics\n\nRequires a cloud API token from [dysrupt-ion.com](https://dysrupt-ion.com)"
+        },
+        "cva.cloudBackendUrl": {
+          "type": "string",
+          "default": "https://invariant.dysrupt-ion.com",
+          "description": "URL of the Invariant cloud backend API"
+        },
+        "cva.cloudApiToken": {
+          "type": "string",
+          "default": "",
+          "description": "API token for Invariant cloud backend authentication",
+          "markdownDescription": "API token for cloud authentication.\n\nGet your token at [dysrupt-ion.com/settings](https://dysrupt-ion.com/settings)"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "cva.verify",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "cva.verifyFile",
+        "key": "ctrl+alt+v",
+        "mac": "cmd+alt+v",
+        "when": "editorTextFocus"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "cva.welcome",
+        "title": "Get Started with CVA",
+        "description": "Set up AI-powered code verification in 3 simple steps",
+        "steps": [
+          {
+            "id": "cva.welcome.createSpec",
+            "title": "Create Your Constitution",
+            "description": "A constitution (spec.txt) tells CVA what rules your code must follow.\n\nCreate a `spec.txt` file in your project root with your coding standards:\n\n```\n# My Project Rules\n- All functions must have docstrings\n- No hardcoded API keys\n- Handle errors gracefully\n```\n\n[Create spec.txt](command:cva.createSpec)",
+            "media": {
+              "markdown": "media/walkthrough/step1.md"
+            }
+          },
+          {
+            "id": "cva.welcome.setupBackend",
+            "title": "Connect to Backend",
+            "description": "CVA uses an AI tribunal to verify your code.\n\n**Option A: Cloud (Recommended)**\nNo setup needed - just sign in!\n\n**Option B: Local Backend**\nFor offline use or privacy, run the backend locally.\n\n[Select Backend](command:cva.selectBackendPath)",
+            "media": {
+              "markdown": "media/walkthrough/step2.md"
+            }
+          },
+          {
+            "id": "cva.welcome.verify",
+            "title": "Verify Your Code!",
+            "description": "You're all set! Run your first verification:\n\n- Press **Ctrl+Shift+V** to verify your workspace\n- Or right-click a file → **CVA: Verify Current File**\n\nVerdicts appear in the CVA sidebar panel.\n\n[Run Verification](command:cva.verify)",
+            "media": {
+              "markdown": "media/walkthrough/step3.md"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "pretest": "npm run compile",
+    "test": "vscode-test",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "@vscode/test-cli": "^0.0.4",
+    "@vscode/test-electron": "^2.3.8",
+    "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.19.0",
+    "eslint": "^8.56.0",
+    "mocha": "^10.2.0",
+    "typescript": "^5.3.0"
+  }
+}

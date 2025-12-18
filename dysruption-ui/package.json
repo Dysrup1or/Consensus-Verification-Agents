@@ -9,9 +9,17 @@
     "start": "node scripts/start.js",
     "lint": "next lint",
     "test": "jest",
-    "smoke:backend": "node scripts/smoke-backend.mjs"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "deps:check": "node -e \"const madge=require('madge'); const paths=['app','components','lib']; madge(paths,{fileExtensions:['ts','tsx','js','jsx'], tsConfig:'./tsconfig.json'}).then((res)=>{ const cycles=res.circular(); if(cycles.length){ console.error('Circular dependencies detected:'); for(const cycle of cycles){ console.error(' - '+cycle.join(' -> ')); } process.exit(1);} console.log('No circular dependencies detected.'); }).catch((e)=>{ console.error(e); process.exit(1); });\"",
+    "smoke:backend": "node scripts/smoke-backend.mjs",
+    "test:e2e": "playwright test",
+    "gate": "node scripts/gate.mjs"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.90.12",
+    "@tanstack/react-query-devtools": "^5.91.1",
+    "canvas-confetti": "^1.9.4",
+    "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.0",
     "lucide-react": "^0.300.0",
     "next": "^14.2.35",
@@ -19,24 +27,32 @@
     "react": "^18",
     "react-dom": "^18",
     "tailwind-merge": "^2.2.0",
-    "unzipper": "^0.12.3"
+    "unzipper": "^0.12.3",
+    "zustand": "^5.0.9"
   },
   "devDependencies": {
+    "@babel/core": "^7.28.5",
+    "@playwright/test": "^1.57.0",
     "@testing-library/jest-dom": "^6.4.0",
     "@testing-library/react": "^14.2.0",
+    "@types/canvas-confetti": "^1.9.0",
     "@types/jest": "^29.5.12",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "autoprefixer": "^10.0.1",
+    "babel-jest": "^29.7.0",
     "eslint": "^8",
     "eslint-config-next": "^14.2.35",
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^29.7.0",
+    "madge": "^8.0.0",
+    "msw": "^2.12.4",
     "postcss": "^8",
     "tailwindcss": "^3.3.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5"
+    "typescript": "^5",
+    "whatwg-fetch": "^3.6.20"
   },
   "overrides": {
     "glob": "10.5.0"

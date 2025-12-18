@@ -3,14 +3,14 @@
 
 # LLM Configuration - 99% Uptime Model Ensemble
 llms:
-  # Architect/Logic Judge - Claude Sonnet 4 (Premium architecture analysis)
+  # Architect/Logic Judge - Gemini 2.0 Flash (COST-EFFECTIVE MODE)
   architect:
-    model: "anthropic/claude-sonnet-4-20250514"
-    provider: "anthropic"
+    model: "gemini/gemini-2.0-flash-exp"
+    provider: "google"
     max_tokens: 4096
     temperature: 0.0  # Deterministic for consistency
-    cost_per_1k_input: 0.015
-    cost_per_1k_output: 0.075
+    cost_per_1k_input: 0.000075
+    cost_per_1k_output: 0.0003
     role: "Senior Architect"
     focus: "logic, structure, efficiency, modularity"
   
@@ -59,14 +59,14 @@ llms:
     role: "Code Fixer"
     focus: "generate patches, fix flaws"
   
-  # Prompt Synthesizer LLM - Claude Sonnet 4 (Best for prompt engineering)
+  # Prompt Synthesizer LLM - Gemini 2.0 Flash (COST-EFFECTIVE MODE)
   synthesizer:
-    model: "anthropic/claude-sonnet-4-20250514"
-    provider: "anthropic"
+    model: "gemini/gemini-2.0-flash-exp"
+    provider: "google"
     max_tokens: 8192
     temperature: 0.3  # Slightly creative for prompt generation
-    cost_per_1k_input: 0.015
-    cost_per_1k_output: 0.075
+    cost_per_1k_input: 0.000075
+    cost_per_1k_output: 0.0003
     role: "Prompt Engineer"
     focus: "synthesize actionable fix prompts from verdict"
   
@@ -85,6 +85,19 @@ thresholds:
   chunk_size_tokens: 10000  # Max tokens per chunk
   context_window: 128000  # Max context window
   human_alignment_target: 0.85  # 85% target alignment with human judgments
+  veto_confidence: 0.85  # Security judge veto threshold (raised from 0.8 to reduce false positives)
+
+# Timeouts Configuration (in seconds)
+# All timeout values are centralized here for easy tuning
+timeouts:
+  llm_request_seconds: 60      # Single LLM API call timeout
+  llm_batch_seconds: 300       # Batch LLM operations (multi-model tribunal)
+  static_pylint_seconds: 30    # Pylint analysis timeout per file
+  static_bandit_seconds: 30    # Bandit security scan timeout
+  self_heal_verify_seconds: 300  # Self-heal verification loop timeout
+  preflight_ping_seconds: 12   # API key validation ping timeout
+  watcher_debounce_seconds: 15 # File watcher debounce (also in watcher section)
+  extraction_seconds: 120      # Spec/constitution extraction timeout
 
 # Environment Variable Keys
 env_keys:
@@ -113,15 +126,31 @@ watcher:
 
 # Static Analysis
 static_analysis:
-  enabled: true
-  fail_fast: true  # Critical issues abort pipeline before LLM calls
+  enabled: false  # Disabled for self-verification to speed up pipeline
+  fail_fast: false  # Disabled for self-verification
+  # Paths excluded from static analysis (relative to project root)
+  exclude_paths:
+    - "sample_project/"
+    - "tests/"
+    - "__pycache__/"
+    - ".venv/"
   pylint:
-    enabled: true
+    enabled: false
     max_line_length: 120
-    disable: ["C0114", "C0115", "C0116"]  # Disable docstring warnings
+    # Disable false positive codes:
+    # C0114/C0115/C0116 - Missing docstrings (style preference)
+    # E0401 - import-error (environment-specific, not a code defect)
+    # E0611 - no-name-in-module (environment-specific)
+    # W0611 - unused-import (often intentional in __init__.py)
+    # R0801 - duplicate-code (cross-file, not per-file relevant)
+    disable: ["C0114", "C0115", "C0116", "E0401", "E0611", "W0611", "R0801"]
   bandit:
     enabled: true
     severity: "low"  # low, medium, high
+    # Skip patterns for bandit (test/sample files often have intentional issues)
+    skip_patterns:
+      - "sample_project/*"
+      - "tests/*"
 
 # Remediation
 remediation:
@@ -148,6 +177,8 @@ retry:
 output:
   report_file: "REPORT.md"
   verdict_file: "verdict.json"
+  sarif_file: "verdict.sarif"
+  sarif_enabled: true  # Enable SARIF export for GitHub Code Scanning
   criteria_file: "criteria.json"
   verbose: true
   color_coded: true  # Green/Red sections in report

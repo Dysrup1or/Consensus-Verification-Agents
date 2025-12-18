@@ -171,6 +171,8 @@ def simulate(
         import_files=import_res.resolved_files,
         constitution_text=constitution_text,
         token_budget=token_budget,
+        spec_text=constitution_text,
+        enable_semantic_boost=True,
     )
 
     prompt = _build_prompt(success_spec, ctx.context)
@@ -359,6 +361,8 @@ def main() -> int:
         import_files=import_res.resolved_files,
         constitution_text=constitution_text,
         token_budget=args.token_budget,
+        spec_text=constitution_text,
+        enable_semantic_boost=True,
     )
 
     prompt = _build_prompt(success_spec, ctx.context)

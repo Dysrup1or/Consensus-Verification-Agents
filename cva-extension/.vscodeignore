@@ -1,0 +1,14 @@
+.vscode-test
+node_modules
+*.vsix
+.DS_Store
+*.log
+src/**
+!src/test/test-workspace/**
+esbuild.js
+tsconfig.json
+.vscode-test.mjs
+.eslintrc.json
+.gitignore
+test-workspace/
+**/*.map

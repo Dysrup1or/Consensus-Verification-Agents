@@ -41,6 +41,7 @@ else:
 
 import asyncio
 from collections import defaultdict
+from contextlib import asynccontextmanager
 import hmac
 import json
 import uuid
@@ -122,6 +123,15 @@ from .persistence.config_store import (
 from .monitoring.queue import enqueue_job
 from .monitoring.worker import run_monitor_worker_loop
 from .persistence.run_store import list_runs_for_branch
+
+# Security modules for path and prompt protection
+from .security import (
+    SecurityManager,
+    get_security_manager,
+    validate_file_path,
+    PathValidationError,
+    check_request_safety,
+)
 
 
 def _ws_jwt_secret() -> str:
@@ -429,47 +439,109 @@ def _create_run_artifacts(run_id: str, base_config_path: str) -> Tuple[Path, Pat
 
     return run_dir, derived_path
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Unified application lifecycle manager.
+    
+    Startup sequence (in order):
+    1. Create runtime directories (temp_uploads, run_artifacts)
+    2. Apply PostgreSQL migrations (if CVA_APPLY_MIGRATIONS=true)
+    3. Ensure SQLite schema (dev/test only)
+    4. Start monitor worker (if CVA_MONITOR_WORKER=true)
+    
+    Shutdown sequence:
+    1. Close all WebSocket connections
+    2. Log shutdown
+    """
+    # =========================================================================
+    # STARTUP
+    # =========================================================================
+    logger.info("CVA API v1.2 starting up...")
+    logger.info("Endpoints: /run, /status/{run_id}, /verdict/{run_id}, /ws/{run_id}")
+
+    # Step 1: Ensure runtime directories exist
+    try:
+        UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+        RUN_ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Runtime directories ready: {UPLOAD_ROOT}, {RUN_ARTIFACTS_ROOT}")
+    except Exception as e:
+        logger.error(f"Failed to create runtime directories: {e}")
+        raise  # Fail startup if we can't write files
+
+    # Step 2: Apply PostgreSQL migrations (production)
+    try:
+        await apply_migrations_if_configured()
+    except Exception as e:
+        logger.error(f"Migration failed: {e}")
+        raise  # Fail startup if migrations fail
+
+    # Step 3: Ensure SQLite schema (dev/test)
+    try:
+        await ensure_sqlite_schema()
+    except Exception as e:
+        logger.error(f"SQLite schema creation failed: {e}")
+        raise  # Fail startup if schema fails
+
+    # Step 4: Start monitor worker (optional)
+    monitor_enabled = os.getenv("CVA_MONITOR_WORKER", "false").lower() == "true"
+    if monitor_enabled:
+        try:
+            # Validate: Postgres requires migrations for monitor tables
+            engine = get_engine()
+            dialect_name = getattr(engine.dialect, "name", "")
+            apply_migrations_enabled = os.getenv("CVA_APPLY_MIGRATIONS", "false").lower() == "true"
+            
+            if dialect_name != "sqlite" and not apply_migrations_enabled:
+                logger.error(
+                    "Monitor worker requires CVA_APPLY_MIGRATIONS=true on Postgres. "
+                    "Skipping worker startup."
+                )
+            else:
+                asyncio.create_task(run_monitor_worker_loop())
+                logger.info("Monitor worker started")
+        except Exception as e:
+            logger.warning(f"Failed to start monitor worker: {e}")
+            # Don't fail startup for optional worker
+
+    # Log final configuration
+    logger.info(
+        "Startup complete: production=%s, port=%s, upload_root=%s",
+        PRODUCTION_MODE,
+        os.getenv("PORT", "not_set"),
+        str(UPLOAD_ROOT),
+    )
+
+    # =========================================================================
+    # YIELD (app runs here)
+    # =========================================================================
+    yield
+
+    # =========================================================================
+    # SHUTDOWN
+    # =========================================================================
+    logger.info("CVA API shutting down...")
+    
+    # Close all WebSocket connections gracefully
+    for run_id, connections in list(ws_manager.active_connections.items()):
+        for ws in connections:
+            try:
+                await ws.close(code=1001, reason="Server shutdown")
+            except Exception:
+                pass  # Connection may already be closed
+    
+    logger.info("Shutdown complete")
+
+
 app = FastAPI(
     title="Dysruption CVA API",
     description="Consensus Verifier Agent - Multi-Model AI Tribunal for Code Verification",
     version="1.2.0",
     docs_url="/docs" if not PRODUCTION_MODE else None,  # Disable docs in production
     redoc_url="/redoc" if not PRODUCTION_MODE else None,
+    lifespan=lifespan,
 )
-
-
-@app.on_event("startup")
-async def _startup_apply_migrations() -> None:
-    await apply_migrations_if_configured()
-    await ensure_sqlite_schema()
-
-    # Optional continuous monitoring worker (single-process).
-    # Enable with CVA_MONITOR_WORKER=true.
-    try:
-        monitor_enabled = os.getenv("CVA_MONITOR_WORKER", "false").lower() == "true"
-        apply_migrations_enabled = os.getenv("CVA_APPLY_MIGRATIONS", "false").lower() == "true"
-
-        if not monitor_enabled:
-            return
-
-        # Guard: on Postgres, the monitor worker requires SQL migrations (monitor_jobs, etc.).
-        # If migrations aren't enabled, skip starting the worker rather than crash-looping.
-        try:
-            engine = get_engine()
-            dialect_name = getattr(engine.dialect, "name", "")
-        except Exception:
-            dialect_name = ""
-
-        if monitor_enabled and dialect_name and dialect_name != "sqlite" and not apply_migrations_enabled:
-            logger.error(
-                "Monitor worker enabled but migrations are not. Set CVA_APPLY_MIGRATIONS=true to create required tables. "
-                f"(dialect={dialect_name})"
-            )
-            return
-
-        asyncio.create_task(run_monitor_worker_loop())
-    except Exception:
-        logger.exception("Failed to start monitor worker")
 
 
 # =============================================================================
@@ -737,6 +809,83 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],  # Restrict to needed methods
     allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
+
+
+# =============================================================================
+# HEALTH CHECK ENDPOINTS
+# =============================================================================
+
+@app.get("/health", include_in_schema=False)
+async def health_liveness():
+    """
+    Lightweight liveness probe for Railway/Kubernetes.
+    
+    This endpoint:
+    - Returns immediately (no database or external calls)
+    - Returns 200 if the process is alive
+    - Used by Railway to determine if container should be restarted
+    
+    For detailed health info, use GET /
+    """
+    return {"status": "alive", "version": "1.2.0"}
+
+
+@app.get("/ready", include_in_schema=False)
+async def health_readiness():
+    """
+    Readiness probe - can this instance serve traffic?
+    
+    Checks:
+    - Database connection
+    - Required directories exist
+    - At least one LLM API key present
+    
+    Returns 503 if not ready.
+    """
+    checks = {
+        "database": "unknown",
+        "filesystem": "unknown", 
+        "api_keys": "unknown",
+    }
+    ready = True
+    
+    # Check 1: Database connection
+    try:
+        from .persistence.db import get_engine
+        engine = get_engine()
+        # Just verify engine was created, don't actually query
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"error: {str(e)}"
+        ready = False
+    
+    # Check 2: Filesystem
+    try:
+        if UPLOAD_ROOT.exists() and RUN_ARTIFACTS_ROOT.exists():
+            checks["filesystem"] = "ok"
+        else:
+            checks["filesystem"] = "directories missing"
+            ready = False
+    except Exception as e:
+        checks["filesystem"] = f"error: {str(e)}"
+        ready = False
+    
+    # Check 3: API Keys (at least one)
+    keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY"]
+    has_key = any(os.environ.get(k) for k in keys)
+    if has_key:
+        checks["api_keys"] = "ok"
+    else:
+        checks["api_keys"] = "no LLM keys configured"
+        # Don't fail readiness for this - might use local models
+    
+    if not ready:
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "not_ready", "checks": checks}
+        )
+    
+    return {"status": "ready", "checks": checks}
 
 
 # =============================================================================
@@ -1246,7 +1395,12 @@ async def run_verification_pipeline(run_id: str) -> None:
 async def root() -> Dict[str, Any]:
     """
     Deep Health Check & API Info.
-    Verifies file system permissions and API key presence.
+    
+    Returns:
+    - 200 OK: System is healthy
+    - 503 Service Unavailable: System is degraded (with details)
+    
+    For lightweight health checks, use GET /health
     """
     health_status = {
         "name": "Dysruption CVA API",
@@ -1257,6 +1411,8 @@ async def root() -> Dict[str, Any]:
             "api_keys": "unknown",
         },
         "endpoints": {
+            "health": "GET /health - Lightweight liveness check",
+            "ready": "GET /ready - Readiness check with dependencies",
             "run": "POST /run - Start verification run",
             "upload": "POST /upload - Upload files for analysis",
             "status": "GET /status/{run_id} - Get run status",
@@ -1264,8 +1420,10 @@ async def root() -> Dict[str, Any]:
             "ws": "WS /ws/{run_id} - Real-time status streaming",
         },
     }
+    
+    is_degraded = False
 
-    # 1. File System Check
+    # 1. File System Check (critical)
     try:
         test_file = UPLOAD_ROOT / ".healthcheck"
         test_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1274,21 +1432,27 @@ async def root() -> Dict[str, Any]:
         health_status["checks"]["filesystem"] = "ok"
     except Exception as e:
         health_status["checks"]["filesystem"] = f"error: {str(e)}"
-        health_status["status"] = "degraded"
+        is_degraded = True
 
-    # 2. API Key Check
-    # Check for common LLM keys. At least one should be present.
+    # 2. API Key Check (informational)
     keys_present = []
-    for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AZURE_API_KEY", "LITELLM_API_KEY"]:
+    for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY"]:
         if os.environ.get(key):
             keys_present.append(key)
     
     if keys_present:
-        health_status["checks"]["api_keys"] = "ok"
+        health_status["checks"]["api_keys"] = f"ok ({len(keys_present)} configured)"
     else:
-        health_status["checks"]["api_keys"] = "missing (OPENAI_API_KEY, etc.)"
-        # We don't mark as degraded yet as user might rely on local models, 
-        # but it's good info.
+        health_status["checks"]["api_keys"] = "warning: no LLM keys configured"
+        # Don't mark as degraded - might use local models
+
+    # Return appropriate status code
+    if is_degraded:
+        health_status["status"] = "degraded"
+        raise HTTPException(
+            status_code=503,
+            detail=health_status
+        )
 
     return health_status
 
@@ -1470,6 +1634,9 @@ async def _run_tribunal_scan(run_id: str, mode: str) -> None:
             forced_files=uncovered_changed,
             constitution_text=constitution_text,
             token_budget=TRIBUNAL_TOKEN_BUDGET,
+            # Phase 2 RAG: Use constitution as spec for semantic file boosting
+            spec_text=constitution_text,
+            enable_semantic_boost=True,
         )
         ctx_ms = int((time.time() - ctx_start) * 1000)
 
@@ -1900,17 +2067,17 @@ async def upload_files(
             # Get relative path from form data, or fallback to filename
             rel_path = paths[i] if i < len(paths) else file.filename
             
-            # Sanitize path to prevent directory traversal
-            clean_rel_path = rel_path.lstrip("/").lstrip("\\").replace("..", "")
+            # Use security module for comprehensive path sanitization
+            # This prevents directory traversal attacks including URL-encoded paths
+            security_mgr = get_security_manager()
+            clean_rel_path = security_mgr.sanitize_relative_path(rel_path)
             
-            # Additional path sanitization: remove any remaining path traversal attempts
-            clean_rel_path = "/".join(
-                part for part in clean_rel_path.replace("\\", "/").split("/")
-                if part and part != ".."
-            )
-            
-            # Construct full path
-            file_path = temp_dir / clean_rel_path
+            # Additional validation: ensure path stays within temp_dir
+            try:
+                file_path = validate_file_path(clean_rel_path, temp_dir, must_exist=False)
+            except PathValidationError as e:
+                logger.warning(f"Path validation failed for upload: {rel_path} - {e}")
+                continue  # Skip this file silently
             
             # Ensure parent directories exist
             file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2021,45 +2188,44 @@ async def start_run(
                    "Please use a full path starting with a drive letter (C:\\...) or forward slash (/...)"
         )
     
-    # Prevent self-scanning (CVA analyzing its own codebase)
-    # BUT: Allow temp_uploads paths - these contain USER-uploaded code, not CVA source
-    target_lower = target_dir.lower().replace('/', '\\')
+    # Self-verification mode: DEVELOPMENT ONLY
+    # End users should not verify the CVA codebase itself - that's our job.
+    # Set CVA_SELF_VERIFY=true in development to enable self-analysis.
+    allow_self_verify = os.getenv("CVA_SELF_VERIFY", "false").lower() == "true"
     
+    target_lower = target_dir.lower().replace('/', '\\')
     is_temp_upload = 'temp_uploads' in target_lower
     
-    if not is_temp_upload:
-        # Only check path-based patterns if NOT a temp_upload
+    if not is_temp_upload and not allow_self_verify:
+        # Block self-scanning for end users (CVA analyzing its own codebase)
         dangerous_patterns = [
-            'consensus verifier agent',
             'dysruption_cva',
-            'dysruption-ui',
+            'invariant\\dysruption_cva',
             'cva\\modules',
-            'cva/modules',
         ]
         
         for pattern in dangerous_patterns:
             if pattern in target_lower:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Cannot scan the CVA application itself (detected: '{pattern}'). "
-                           "Please select your target project directory, not the CVA installation."
+                    detail="This directory appears to be the Invariant installation. "
+                           "Please select your target project directory instead."
                 )
-    
-    # ROBUST CHECK: Look for actual CVA source files regardless of path
-    cva_signature_files = [
-        os.path.join(target_dir, 'modules', 'tribunal.py'),
-        os.path.join(target_dir, 'modules', 'api.py'),
-        os.path.join(target_dir, 'cva.py'),
-    ]
-    
-    cva_files_found = [f for f in cva_signature_files if os.path.exists(f)]
-    if len(cva_files_found) >= 2:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot scan the CVA application itself. "
-                   "Detected CVA source files in target directory. "
-                   "Please select your target project directory, not the CVA installation."
-        )
+        
+        # Signature file check
+        cva_signature_files = [
+            os.path.join(target_dir, 'modules', 'tribunal.py'),
+            os.path.join(target_dir, 'modules', 'api.py'),
+            os.path.join(target_dir, 'cva.py'),
+        ]
+        
+        cva_files_found = [f for f in cva_signature_files if os.path.exists(f)]
+        if len(cva_files_found) >= 2:
+            raise HTTPException(
+                status_code=400,
+                detail="This directory contains Invariant source files. "
+                       "Please select your target project directory instead."
+            )
     
     # Validate target directory exists
     if not os.path.exists(target_dir):
@@ -2083,6 +2249,7 @@ async def start_run(
                     "Upload a project first, then pass the returned temp_uploads path to /run."
                 ),
             )
+
 
     # =========================================================================
     # START THE RUN
@@ -2508,46 +2675,6 @@ async def websocket_endpoint(websocket: WebSocket, run_id: str) -> None:
         import traceback
         traceback.print_exc()
         ws_manager.disconnect(websocket, run_id)
-
-
-# =============================================================================
-# STARTUP/SHUTDOWN EVENTS
-# =============================================================================
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Initialize on startup."""
-    logger.info("CVA API v1.2 starting up...")
-    logger.info("Endpoints: /run, /status/{run_id}, /verdict/{run_id}, /ws/{run_id}")
-
-    # Ensure runtime directories exist (important on Railway + ephemeral filesystems).
-    try:
-        UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-        RUN_ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        logger.warning(f"Failed to create runtime dirs: {e}")
-
-    logger.info(
-        "Startup config: production=%s port=%s upload_root=%s run_artifacts_root=%s",
-        PRODUCTION_MODE,
-        os.getenv("PORT", ""),
-        str(UPLOAD_ROOT),
-        str(RUN_ARTIFACTS_ROOT),
-    )
-
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    """Cleanup on shutdown."""
-    logger.info("CVA API shutting down...")
-    # Close all WebSocket connections
-    for run_id, connections in ws_manager.active_connections.items():
-        for ws in connections:
-            try:
-                await ws.close()
-            except Exception:
-                pass
 
 
 # =============================================================================

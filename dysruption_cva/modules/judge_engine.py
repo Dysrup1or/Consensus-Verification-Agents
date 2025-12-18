@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -23,6 +24,22 @@ try:
     LITELLM_AVAILABLE = True
 except Exception:
     LITELLM_AVAILABLE = False
+
+
+# Context Windowing for token optimization
+try:
+    from .monitoring.context_windowing import (
+        IntelligentContextBuilder,
+        build_windowed_llm_context,
+    )
+    CONTEXT_WINDOWING_AVAILABLE = True
+except ImportError as e:
+    logger.debug(f"Context windowing not available: {e}")
+    CONTEXT_WINDOWING_AVAILABLE = False
+
+
+# Feature flag for context windowing (can be controlled via env var)
+ENABLE_CONTEXT_WINDOWING = os.environ.get("CVA_CONTEXT_WINDOWING", "1").lower() in ("1", "true", "yes")
 
 
 @dataclass(frozen=True)
@@ -260,8 +277,33 @@ async def judge_engine(
     llm_model: str,
     llm_timeout_seconds: int,
     llm_enabled: bool = True,
+    # Context windowing parameters
+    repo_path: Optional[str] = None,
+    use_context_windowing: Optional[bool] = None,
+    criterion_type: Optional[str] = None,
+    criterion_text: Optional[str] = None,
 ) -> JudgeOutput:
-    """Run deterministic constitution checks + optional LLM intent checks."""
+    """Run deterministic constitution checks + optional LLM intent checks.
+    
+    When context windowing is enabled (default), uses intelligent token optimization
+    to reduce context size by ~50% while maintaining verification accuracy.
+    
+    Args:
+        file_texts: Dict of file paths to contents for LLM context
+        file_texts_for_deterministic: Optional override for deterministic checks
+        constitution_text: The constitution to check against
+        skipped_imports: List of skipped import paths
+        token_count: Current token count
+        token_budget_partial: Whether budget was exceeded
+        success_spec: The success specification for intent checks
+        llm_model: LLM model identifier
+        llm_timeout_seconds: Timeout for LLM calls
+        llm_enabled: Whether to run LLM checks
+        repo_path: Path to git repo (for change detection)
+        use_context_windowing: Override windowing flag (None = use global setting)
+        criterion_type: Type of criterion being checked (e.g., "security")
+        criterion_text: Full criterion description for relevance scoring
+    """
 
     start = time.time()
     rules = parse_constitution_rules(constitution_text)
@@ -274,11 +316,36 @@ async def judge_engine(
 
     intent_verdicts: List[Dict[str, Any]] = []
     llm_latency_ms: Optional[int] = None
+    windowing_metrics: Dict[str, Any] = {}
 
     if llm_enabled:
         # Note: token_budget_partial may mean constitution/context was truncated.
         # We still attempt intent checks unless asked to disable.
-        context_for_llm = "\n".join([f"# FILE: {p}\n{t}" for p, t in file_texts.items()])
+        
+        # Determine whether to use context windowing
+        should_window = use_context_windowing if use_context_windowing is not None else ENABLE_CONTEXT_WINDOWING
+        
+        if should_window and CONTEXT_WINDOWING_AVAILABLE and repo_path:
+            # Use intelligent context windowing for token optimization
+            try:
+                context_for_llm, windowing_metrics = build_windowed_llm_context(
+                    repo_path=repo_path,
+                    file_texts=file_texts,
+                    token_budget=50000,  # Conservative budget
+                    criterion_type=criterion_type,
+                    criterion_text=criterion_text,
+                )
+                logger.info(
+                    f"Context windowing: {windowing_metrics.get('savings_percent', 0):.1f}% savings "
+                    f"({windowing_metrics.get('original_tokens', 0)} -> {windowing_metrics.get('windowed_tokens', 0)} tokens)"
+                )
+            except Exception as e:
+                logger.warning(f"Context windowing failed, falling back to full context: {e}")
+                context_for_llm = "\n".join([f"# FILE: {p}\n{t}" for p, t in file_texts.items()])
+        else:
+            # Original full-file context (no windowing)
+            context_for_llm = "\n".join([f"# FILE: {p}\n{t}" for p, t in file_texts.items()])
+        
         llm_batch_details: Dict[str, Any] = {}
         try:
             intent_verdicts, llm_latency_ms = await run_intent_llm_checks(
@@ -289,6 +356,9 @@ async def judge_engine(
             )
             # Phase 5 (P5.2): single-call uses batch primitive internally.
             llm_batch_details = {"batch_size": 1, "mode": "single", "per_item_latency_ms": [int(llm_latency_ms or 0)]}
+            # Include windowing metrics if available
+            if windowing_metrics:
+                llm_batch_details["context_windowing"] = windowing_metrics
         except asyncio.TimeoutError:
             raise
 

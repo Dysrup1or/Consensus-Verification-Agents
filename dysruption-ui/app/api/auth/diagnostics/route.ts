@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { IS_PROD, resolveNextAuthSecret } from '@/lib/authEnv';
 
 export const runtime = 'nodejs';
 
@@ -30,6 +31,9 @@ export async function GET(req: NextRequest) {
   const githubCallback = `${effectiveBaseUrl}/api/auth/callback/github`;
   const googleCallback = `${effectiveBaseUrl}/api/auth/callback/google`;
 
+  const configuredSecret = Boolean((process.env.NEXTAUTH_SECRET || '').trim());
+  const effectiveSecret = resolveNextAuthSecret();
+
   return NextResponse.json(
     {
       now: new Date().toISOString(),
@@ -49,6 +53,7 @@ export async function GET(req: NextRequest) {
       env: {
         hasNEXTAUTH_URL: Boolean((process.env.NEXTAUTH_URL || '').trim()),
         hasNEXTAUTH_SECRET: Boolean((process.env.NEXTAUTH_SECRET || '').trim()),
+        usingDevFallbackSecret: !IS_PROD && !configuredSecret && typeof effectiveSecret === 'string',
         hasGITHUB_ID: Boolean((process.env.GITHUB_ID || '').trim()),
         hasGITHUB_SECRET: Boolean((process.env.GITHUB_SECRET || '').trim()),
         hasGOOGLE_CLIENT_ID: Boolean((process.env.GOOGLE_CLIENT_ID || '').trim()),

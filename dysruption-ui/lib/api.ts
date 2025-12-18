@@ -6,6 +6,8 @@ import {
   Invariant,
   PromptResponse,
   VerdictsPayload,
+  GitHubRepoListItem,
+  GitHubBranchListItem,
 } from './types';
 
 // Always go through the Next.js server proxy. This keeps secrets (CVA_API_TOKEN)
@@ -147,6 +149,90 @@ export async function fetchVerdictsPayload(runId: string): Promise<VerdictsPaylo
   } catch {
     return {};
   }
+}
+
+// =============================================================================
+// UI SERVER ROUTES (NEXT.JS API)
+// =============================================================================
+
+/**
+ * Fetch a short-lived WebSocket token from the Next.js server.
+ * Only used in production (dev does not require token).
+ */
+export async function fetchWsToken(runId: string): Promise<string | null> {
+  if (process.env.NODE_ENV !== 'production') return null;
+
+  try {
+    const res = await fetch(`/api/ws-token?runId=${encodeURIComponent(runId)}`, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const payload = (await res.json().catch(() => null as any)) as any;
+    const token = payload?.ws_token;
+    return typeof token === 'string' && token.length > 0 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchGitHubRepos(): Promise<GitHubRepoListItem[]> {
+  const resp = await fetch('/api/github/repos', { cache: 'no-store' });
+  if (!resp.ok) {
+    const payload = await resp.json().catch(() => null as any);
+    const error = payload?.error ? String(payload.error) : `HTTP ${resp.status}`;
+    throw new Error(`Failed to load repos (${error})`);
+  }
+  const data = (await resp.json().catch(() => null as any)) as { repos?: GitHubRepoListItem[] };
+  return Array.isArray(data?.repos) ? data.repos : [];
+}
+
+export async function fetchGitHubBranches(repo: string): Promise<GitHubBranchListItem[]> {
+  const resp = await fetch(`/api/github/branches?repo=${encodeURIComponent(repo)}`, { cache: 'no-store' });
+  if (!resp.ok) {
+    const payload = await resp.json().catch(() => null as any);
+    const error = payload?.error ? String(payload.error) : `HTTP ${resp.status}`;
+    throw new Error(`Failed to load branches (${error})`);
+  }
+  const data = (await resp.json().catch(() => null as any)) as { branches?: GitHubBranchListItem[] };
+  return Array.isArray(data?.branches) ? data.branches : [];
+}
+
+export async function fetchGitHubInstallationId(repo: string): Promise<number | null> {
+  try {
+    const resp = await fetch(`/api/github/installations?repo=${encodeURIComponent(repo)}`, { cache: 'no-store' });
+    if (!resp.ok) return null;
+    const payload = (await resp.json().catch(() => null as any)) as any;
+    const installationId = payload?.installation_id;
+    return typeof installationId === 'number' && installationId > 0 ? installationId : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function importGitHubRepo(repo: string, ref: string): Promise<{
+  targetPath: string;
+  fileCount: number;
+  repo: string;
+  ref: string;
+}> {
+  const importResp = await fetch('/api/github/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo, ref }),
+    cache: 'no-store',
+  });
+
+  if (!importResp.ok) {
+    const payload = await importResp.json().catch(() => null as any);
+    const error = payload?.error ? String(payload.error) : `HTTP ${importResp.status}`;
+    throw new Error(`GitHub import failed (${error})`);
+  }
+
+  const imported = (await importResp.json().catch(() => null as any)) as any;
+  return {
+    targetPath: String(imported?.targetPath || ''),
+    fileCount: Number(imported?.fileCount || 0),
+    repo: String(imported?.repo || repo),
+    ref: String(imported?.ref || ref),
+  };
 }
 
 /**

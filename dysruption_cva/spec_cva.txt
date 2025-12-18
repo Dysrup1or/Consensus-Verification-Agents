@@ -1,0 +1,174 @@
+# Project Specification: Dysruption Consensus Verifier Agent (CVA)
+
+## Overview
+
+Build a multi-model AI tribunal system for automated code verification against specifications.
+The CVA uses a consensus of LLM judges to evaluate code quality, security, and spec compliance.
+The system operates as a CLI tool with an optional FastAPI backend for web/integration use.
+
+## System Architecture
+
+### Operating Modes
+
+1. **CLI Mode (Primary)**: Run `python cva.py <target_dir>` to verify a codebase
+2. **Watch Mode**: Monitor directories for changes with debounce
+3. **API Mode (Optional)**: FastAPI endpoints for programmatic access
+4. **Git Mode**: Clone and verify remote repositories
+
+### Core Components
+
+1. **Watcher Module** (`watcher.py`): Monitors directories for file changes
+2. **Parser Module** (`parser.py`): Extracts invariants from spec.txt using LLM
+3. **Tribunal Module** (`tribunal.py`): Multi-judge evaluation with consensus voting
+4. **File Manager** (`file_manager.py`): Safe file operations with path validation
+5. **Router Module** (`router.py`): Routes requests to appropriate LLM providers
+6. **Self-Heal Module** (`self_heal.py`): Autonomous patch generation and application
+7. **API Module** (`api.py`): FastAPI REST endpoints + WebSocket streaming
+
+## Technical Requirements
+
+### Architecture & Design
+
+1. Use Python 3.10+ as the runtime environment
+2. Use LiteLLM for multi-provider LLM abstraction
+3. Use Pydantic for data validation and schema enforcement
+4. Use Loguru for structured logging
+5. Structure code in a modular fashion (one responsibility per module)
+6. Support both synchronous CLI and async API operations
+
+### Security Requirements
+
+7. Validate all file paths to prevent directory traversal attacks
+8. Sanitize user-provided content before LLM prompt inclusion
+9. Use environment variables for API keys (no hardcoded secrets)
+10. Implement rate limiting on API endpoints
+11. Require authentication tokens for production API access
+12. Validate webhook signatures for GitHub integration
+13. Prevent prompt injection attacks via structural delimiters
+14. Log security events for audit purposes
+
+### API Endpoints (Optional Mode)
+
+15. POST /run - Start a verification run
+16. GET /status/{run_id} - Get run status
+17. GET /verdict/{run_id} - Get final verdict
+18. POST /upload - Upload project files for verification
+19. WebSocket /ws - Real-time streaming of verification progress
+
+### LLM Configuration
+
+20. Support multiple LLM providers (Anthropic, Google, OpenAI, DeepSeek)
+21. Implement retry logic with exponential backoff
+22. Support fallback models when primary fails
+23. Cache responses to reduce API costs
+24. Enforce token limits on prompts
+
+## Functional Requirements
+
+### Invariant Extraction
+
+1. Parse spec.txt to extract testable requirements
+2. Categorize invariants: Security, Functionality, Style
+3. Assign severity levels: critical, high, medium, low
+4. Cache extracted invariants to avoid redundant LLM calls
+5. Re-prompt for missing categories if needed
+
+### Multi-Judge Tribunal
+
+6. Use 3 specialized judges for evaluation:
+   - Architect Judge: Design patterns, modularity, logic correctness
+   - Security Judge: Vulnerabilities, injection risks, authentication flaws
+   - User Proxy Judge: Spec alignment, feature completeness, usability
+7. Require 2/3 majority for PASS verdict
+8. Security judge has VETO authority (>80% confidence FAIL = final FAIL)
+9. Aggregate scores using weighted average
+10. Track confidence levels for each judgment
+
+### Static Analysis
+
+11. Run pylint for code quality checks
+12. Run bandit for security vulnerability scanning
+13. Fail-fast on critical static analysis issues
+14. Exclude test files from fail-fast criteria
+15. Parse and aggregate static analysis results
+
+### Report Generation
+
+16. Generate REPORT.md with detailed findings
+17. Include per-criterion scores and explanations
+18. Highlight security issues prominently
+19. Provide actionable remediation suggestions
+20. Export machine-readable verdict.json for CI/CD
+
+### Self-Healing (Autonomous Remediation)
+
+21. Generate unified diff patches for failed criteria
+22. Apply patches atomically with rollback support
+23. Re-verify after patch application
+24. Track patch application history
+25. Limit remediation attempts to prevent infinite loops
+
+### Error Handling
+
+26. Return appropriate exit codes (0=PASS, 1=FAIL, 2=ERROR)
+27. Log all errors with full context
+28. Handle LLM rate limits with retry and backoff
+29. Handle network failures gracefully
+30. Provide clear error messages for configuration issues
+
+## Code Quality Requirements
+
+- Follow PEP 8 style guidelines
+- Include docstrings for all public functions
+- Use type hints throughout
+- No hardcoded API keys or secrets
+- Modular design with clear separation of concerns
+- Unit tests for critical paths (>80% coverage target)
+- No SQL injection vulnerabilities
+- No path traversal vulnerabilities
+- No prompt injection vulnerabilities
+
+## Configuration
+
+### Environment Variables
+
+```
+GOOGLE_API_KEY         - Gemini API key for parser and user proxy
+ANTHROPIC_API_KEY      - Claude API key for architect judge
+DEEPSEEK_API_KEY       - DeepSeek API key for security judge
+OPENAI_API_KEY         - OpenAI API key for remediation
+CVA_API_TOKEN          - Authentication token for API mode
+CVA_PRODUCTION         - Enable production security (true/false)
+CVA_ALLOWED_ORIGINS    - CORS allowed origins
+CVA_UPLOAD_ROOT        - Directory for file uploads
+CVA_RATE_LIMIT         - Requests per minute limit
+```
+
+### Configuration File (config.yaml)
+
+```yaml
+models:
+  extraction: gemini/gemini-2.0-flash
+  architect: anthropic/claude-sonnet-4-20250514
+  security: deepseek/deepseek-chat
+  user_proxy: gemini/gemini-2.5-pro-preview-06-05
+  remediation: openai/gpt-4o-mini
+
+thresholds:
+  pass_score: 7
+  veto_confidence: 0.8
+  chunk_size_tokens: 8000
+  timeout_llm_request: 45
+
+retry:
+  max_attempts: 5
+  backoff_seconds: 2
+  backoff_multiplier: 2
+```
+
+## Output Artifacts
+
+1. **verdict.json**: Machine-readable verdict with scores
+2. **REPORT.md**: Human-readable detailed report
+3. **run_history.json**: History of all verification runs
+4. **run_artifacts/**: Per-run artifacts (patches, logs)

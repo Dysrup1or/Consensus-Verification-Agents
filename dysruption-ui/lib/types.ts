@@ -154,6 +154,22 @@ export interface RunListResponse {
 }
 
 // =============================================================================
+// GITHUB (UI)
+// =============================================================================
+
+export interface GitHubRepoListItem {
+  id: number;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+}
+
+export interface GitHubBranchListItem {
+  name: string;
+  protected: boolean;
+}
+
+// =============================================================================
 // WEBSOCKET MODELS
 // =============================================================================
 

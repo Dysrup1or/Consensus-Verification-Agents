@@ -8,7 +8,9 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import yaml
 
 from .schemas import PatchSet
 
@@ -308,11 +310,35 @@ def run_self_heal_patch_loop(
     return SelfHealResult(success=False, iterations=results)
 
 
+def _load_config_yaml(config_path: str = "config.yaml") -> Dict[str, Any]:
+    """Load configuration from YAML file."""
+    path = Path(config_path)
+    if not path.exists():
+        # Try relative to module directory
+        path = Path(__file__).parent.parent / config_path
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except Exception:
+            pass
+    return {}
+
+
 def config_from_env() -> SelfHealConfig:
+    # First, try to load from config.yaml
+    cfg = _load_config_yaml()
+    timeouts_cfg = cfg.get("timeouts", {})
+    
+    # Environment variables take precedence over config.yaml
     enabled = os.getenv("CVA_SELF_HEAL_ENABLED", "false").lower() == "true"
     max_iterations = int(os.getenv("CVA_SELF_HEAL_MAX_ITERATIONS", "1"))
     max_files = int(os.getenv("CVA_SELF_HEAL_MAX_FILES", "10"))
-    timeout = int(os.getenv("CVA_SELF_HEAL_VERIFY_TIMEOUT_SECONDS", "300"))
+    
+    # Timeout: env var > config.yaml > default 300s
+    default_timeout = timeouts_cfg.get("self_heal_verify_seconds", 300)
+    timeout = int(os.getenv("CVA_SELF_HEAL_VERIFY_TIMEOUT_SECONDS", str(default_timeout)))
+    
     return SelfHealConfig(
         enabled=enabled,
         max_iterations=max_iterations,

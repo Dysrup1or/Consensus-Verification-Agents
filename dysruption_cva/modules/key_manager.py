@@ -82,6 +82,9 @@ class KeyManager:
         self._key_status: Dict[str, KeyStatus] = {}
         self._provider_health: Dict[str, ProviderHealth] = {}
         
+        # Thread safety lock for status updates
+        self._status_lock = threading.Lock()
+        
         # Error tracking for rate limits
         self._error_counts: Dict[str, int] = {}
         self._rate_limit_until: Dict[str, datetime] = {}
@@ -145,7 +148,7 @@ class KeyManager:
             )
             
             if is_valid:
-                logger.info(f"✓ {provider.upper()} key found (****{key_suffix})")
+                logger.info(f"✓ {provider.upper()} key configured")
             else:
                 logger.warning(f"✗ {provider.upper()} key not set or invalid")
 
@@ -180,36 +183,38 @@ class KeyManager:
         return None
 
     def record_success(self, provider: str) -> None:
-        """Record a successful API call."""
-        if provider in self._provider_health:
-            self._provider_health[provider].is_healthy = True
-            self._provider_health[provider].last_successful_call = datetime.now()
-            self._provider_health[provider].rate_limited = False
-            self._error_counts[provider] = 0
+        """Record a successful API call (thread-safe)."""
+        with self._status_lock:
+            if provider in self._provider_health:
+                self._provider_health[provider].is_healthy = True
+                self._provider_health[provider].last_successful_call = datetime.now()
+                self._provider_health[provider].rate_limited = False
+                self._error_counts[provider] = 0
 
     def record_error(self, provider: str, error: str, is_rate_limit: bool = False) -> None:
-        """Record an API error."""
-        self._error_counts[provider] = self._error_counts.get(provider, 0) + 1
-        
-        if provider in self._key_status:
-            self._key_status[provider].error_count += 1
-            self._key_status[provider].last_error = error[:100]
-        
-        if provider in self._provider_health:
-            # Mark as rate limited if hit limit
-            if is_rate_limit:
-                self._provider_health[provider].rate_limited = True
-                # Estimate reset time (usually 60 seconds)
-                from datetime import timedelta
-                self._provider_health[provider].rate_limit_reset = (
-                    datetime.now() + timedelta(seconds=60)
-                )
-                logger.warning(f"⚠️ {provider.upper()} rate limited, retry after 60s")
+        """Record an API error (thread-safe)."""
+        with self._status_lock:
+            self._error_counts[provider] = self._error_counts.get(provider, 0) + 1
             
-            # Mark as unhealthy after 3 consecutive errors
-            if self._error_counts.get(provider, 0) >= 3:
-                self._provider_health[provider].is_healthy = False
-                logger.error(f"🔴 {provider.upper()} marked unhealthy (3+ errors)")
+            if provider in self._key_status:
+                self._key_status[provider].error_count += 1
+                self._key_status[provider].last_error = error[:100]
+            
+            if provider in self._provider_health:
+                # Mark as rate limited if hit limit
+                if is_rate_limit:
+                    self._provider_health[provider].rate_limited = True
+                    # Estimate reset time (usually 60 seconds)
+                    from datetime import timedelta
+                    self._provider_health[provider].rate_limit_reset = (
+                        datetime.now() + timedelta(seconds=60)
+                    )
+                    logger.warning(f"⚠️ {provider.upper()} rate limited, retry after 60s")
+                
+                # Mark as unhealthy after 3 consecutive errors
+                if self._error_counts.get(provider, 0) >= 3:
+                    self._provider_health[provider].is_healthy = False
+                    logger.error(f"🔴 {provider.upper()} marked unhealthy (3+ errors)")
 
     def check_rate_limit_expired(self, provider: str) -> bool:
         """Check if rate limit has expired for a provider."""

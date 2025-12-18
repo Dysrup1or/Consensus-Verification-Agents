@@ -1,0 +1,51 @@
+# CVA Core Workflow Verification Spec
+# Purpose: Verify fidelity to marketed claims on CORE files only
+
+## MARKETED CLAIM: Multi-Agent Tribunal Consensus
+- MUST implement 3-judge consensus mechanism (Architect, Security, User Proxy)
+- Each judge MUST produce structured JSON verdicts with scores 1-10
+- Security judge MUST have veto capability for critical vulnerabilities
+- Weighted consensus (2/3 majority) MUST be implemented
+- Veto protocol: Security fail with >80% confidence = final FAIL
+
+## MARKETED CLAIM: Tiered Dependency Resolution
+- MUST resolve Python imports (absolute and relative)
+- MUST resolve TypeScript/JavaScript imports (including tsconfig paths)
+- MUST support configurable depth traversal
+- MUST track dependency edges for centrality scoring
+- MUST handle monorepo/workspace package references
+
+## MARKETED CLAIM: Intelligent Coverage Planning
+- MUST assign files to tiers: full, slice, header, skip
+- MUST respect token budgets for LLM context windows
+- MUST use risk scoring based on file changes + centrality
+- MUST support forced file inclusion
+- MUST produce structured CoveragePlan with manifest
+
+## MARKETED CLAIM: Constitution-Based Verification
+- MUST extract requirements from natural language specs
+- MUST categorize into: security, functionality, style
+- MUST assign severity levels: critical, high, medium, low
+- MUST use LLM (Gemini Flash) for intelligent extraction
+
+## MARKETED CLAIM: Fail-Fast Static Analysis
+- MUST run pylint for code quality (when enabled)
+- MUST run bandit for security scanning (when enabled)
+- MUST abort pipeline on critical static analysis failures
+- Timeouts MUST be configurable
+
+## MARKETED CLAIM: Remediation Generation
+- MUST generate unified diff patches for failed criteria
+- MUST use GPT-4o-mini for remediation suggestions
+- Fixes MUST be specific and actionable
+
+## SECURITY REQUIREMENTS
+- NO hardcoded API keys in source code
+- API keys MUST be loaded from environment variables
+- LLM API calls MUST have configurable timeouts
+- Error handling MUST NOT leak sensitive information
+
+## CODE QUALITY
+- Functions MUST have type annotations
+- Public APIs MUST have docstrings
+- Async operations MUST have proper exception handling

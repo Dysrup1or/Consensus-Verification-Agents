@@ -1,0 +1,142 @@
+# CVA (Constitution Verification Agent) - Self-Verification Specification
+# Version: 1.0
+# Purpose: Define the requirements for the CVA system itself
+
+## MISSION STATEMENT
+The CVA is a multi-agent code review system that evaluates codebases against 
+project specifications. It must be secure, reliable, efficient, and produce 
+consistent verdicts across runs.
+
+## CORE ARCHITECTURE REQUIREMENTS
+
+### Module System
+- MUST have clear module separation: parser, tribunal, router, sandbox, etc.
+- Each module MUST have a single responsibility (SRP)
+- Modules MUST NOT have circular dependencies
+- All public functions MUST have type annotations
+
+### API Design
+- FastAPI endpoints MUST follow RESTful conventions
+- All endpoints MUST validate input using Pydantic schemas
+- Error responses MUST use consistent structure with error codes
+- CORS and rate limiting MUST be configurable
+
+## SECURITY REQUIREMENTS
+
+### Critical Security (Severity: Critical)
+- NO hardcoded API keys or secrets in source code
+- ALL API keys MUST be loaded from environment variables
+- Subprocess commands MUST NOT allow shell injection
+- File paths MUST be validated to prevent directory traversal
+- NEVER execute untrusted code outside sandboxed containers
+
+### High Security (Severity: High)
+- External API calls MUST use timeouts to prevent hanging
+- Sensitive data (API keys, tokens) MUST NOT be logged
+- Rate limiting SHOULD be implemented on public endpoints
+- Input validation MUST sanitize all user-provided paths
+
+### Medium Security (Severity: Medium)
+- Error messages MUST NOT leak stack traces in production
+- Temporary files MUST be cleaned up after use
+- Database queries SHOULD use parameterized statements
+
+## FUNCTIONALITY REQUIREMENTS
+
+### Parser Module (Severity: High)
+- MUST extract invariants from natural language specifications
+- MUST support security, functionality, and style categories
+- MUST handle large specification files (>10KB) without crashing
+- SHOULD use caching for repeated extractions
+
+### Tribunal Module (Severity: Critical)
+- MUST implement multi-judge consensus mechanism
+- Each judge MUST produce structured JSON verdicts
+- Judges MUST use appropriate LLM providers as configured
+- Verdicts MUST include scores, explanations, and confidence
+- Self-healing loop MUST limit iterations to prevent infinite loops
+
+### Router Module (Severity: High)
+- MUST route requests to appropriate judges based on criteria category
+- MUST handle LLM API failures gracefully with retries
+- SHOULD support fallback providers for reliability
+
+### Sandbox Runner (Severity: High)
+- MUST execute code in isolated Docker containers
+- MUST enforce resource limits (CPU, memory, time)
+- MUST capture stdout/stderr separately
+- Container MUST be destroyed after execution
+
+### Static Analysis (Severity: Medium)
+- pylint MUST run with appropriate configurations
+- bandit MUST scan for security vulnerabilities
+- Analysis timeouts MUST be configurable
+- Analysis MUST NOT block on slow files indefinitely
+
+## RELIABILITY REQUIREMENTS
+
+### Error Handling (Severity: High)
+- ALL async operations MUST have proper exception handling
+- API timeouts MUST be configurable via config.yaml
+- Failed operations SHOULD be retried with exponential backoff
+- System MUST gracefully degrade if a provider is unavailable
+
+### Logging (Severity: Medium)
+- MUST use structured logging (loguru)
+- Log levels MUST be configurable
+- Logs SHOULD include correlation IDs for distributed tracing
+
+### Configuration (Severity: Medium)
+- ALL configurable values MUST be in config.yaml
+- Environment variables SHOULD override config file values
+- Configuration MUST be validated at startup
+
+## STYLE REQUIREMENTS
+
+### Code Quality (Severity: Medium)
+- MUST follow PEP 8 style guidelines
+- Functions SHOULD be under 50 lines
+- Classes SHOULD follow SOLID principles
+- Complex logic SHOULD have docstrings
+
+### Documentation (Severity: Low)
+- Public APIs MUST have docstrings
+- README MUST include setup instructions
+- Configuration options SHOULD be documented
+
+### Testing (Severity: Medium)
+- Critical modules MUST have unit tests
+- Test coverage SHOULD be above 70%
+- Tests MUST be able to run without external dependencies (mocking)
+
+## PERFORMANCE REQUIREMENTS
+
+### Efficiency (Severity: Medium)
+- Tribunal consensus SHOULD complete within 60 seconds
+- File processing SHOULD use async I/O where possible
+- Large files SHOULD be processed incrementally
+- Database operations SHOULD be batched when possible
+
+### Scalability (Severity: Low)
+- System SHOULD handle codebases up to 1000 files
+- Parallel judge execution SHOULD be supported
+- Resource usage SHOULD be monitored
+
+## AGENT BEHAVIOR REQUIREMENTS (CONSISTENCY)
+
+### Judge Consistency (Severity: High)
+- Judges MUST produce deterministic JSON output format
+- Score explanations MUST justify the numeric score
+- Confidence values MUST reflect uncertainty appropriately
+- Issues and suggestions MUST be specific and actionable
+
+### Prompt Engineering (Severity: High)
+- System prompts MUST include clear scoring rubrics
+- Few-shot examples MUST demonstrate expected output format
+- Output format constraints MUST be explicitly stated
+- Role definitions MUST be clear and consistent
+
+### Consensus Mechanism (Severity: High)
+- Final verdict MUST aggregate all judge scores consistently
+- Conflicting verdicts MUST be resolved with clear rules
+- Remediation suggestions MUST not contradict each other

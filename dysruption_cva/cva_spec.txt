@@ -1,0 +1,339 @@
+# CVA (Consensus Verifier Agent) - Core System Specification
+
+## Vision Statement
+
+The Dysruption CVA is the foundation for **autonomous self-improving software systems**.
+It serves as a universal verification engine that can analyze ANY codebase against ANY specification,
+providing persistent error detection, notification, and remediation guidance.
+
+This is not just a linter or test runner - it is the first step toward programs that build and fix themselves.
+
+**Core Philosophy**: CVA should be able to verify itself. Self-verification is not a bug to prevent,
+but a critical capability that demonstrates the system works correctly on complex, real-world code.
+
+---
+
+## Technical Requirements
+
+### Architecture (arch:*)
+
+1. **arch:modular** - Code MUST be organized into logical modules with clear separation of concerns:
+   - `modules/` directory contains all major components
+   - Each module handles a single responsibility
+   - Inter-module dependencies are explicit and minimal
+
+2. **arch:config-driven** - All configurable parameters MUST be externalized:
+   - `config.yaml` for runtime configuration
+   - Environment variables for secrets (API keys)
+   - No hardcoded values for thresholds, model names, or paths
+
+3. **arch:persistence** - System state MUST be persistable and recoverable:
+   - SQLite database for structured data (`.cva_cache/`)
+   - JSON files for run artifacts (`run_artifacts/`, `verdict.json`, `criteria.json`)
+   - Embedding vectors stored efficiently (`embeddings/`)
+
+4. **arch:async-ready** - I/O-bound operations SHOULD support async patterns:
+   - LLM API calls support async/await
+   - File operations can run concurrently
+   - No blocking operations in hot paths
+
+### Tribunal System (tribunal:*)
+
+5. **tribunal:multi-model** - Verification MUST use multiple independent LLM judges:
+   - Minimum 3 judges with different model families
+   - No single model can dominate the verdict
+   - Consensus or majority voting determines outcomes
+
+6. **tribunal:veto-protocol** - Security-critical failures MUST trigger immediate rejection:
+   - Security judge can veto with high confidence (>80%)
+   - Veto overrides other judges' scores
+   - Veto reasoning is prominently displayed
+
+7. **tribunal:scoring-rubric** - All judges MUST use consistent 1-10 scoring:
+   - 10: Exceeds requirements
+   - 8-9: Fully compliant
+   - 7: Adequately meets requirements (threshold for PASS)
+   - 5-6: Partial compliance
+   - 1-4: Non-compliant (FAIL)
+
+8. **tribunal:explanations** - Every score MUST include human-readable justification:
+   - Specific issues identified
+   - Actionable suggestions for fixes
+   - Confidence level in assessment
+
+### RAG Integration (rag:*)
+
+9. **rag:semantic-search** - File selection MUST use semantic similarity:
+   - Embed code files into vector space
+   - Match criteria to relevant files by semantic distance
+   - Not just keyword matching - understand intent
+
+10. **rag:chunking** - Large files MUST be chunked intelligently:
+    - Respect language syntax (functions, classes)
+    - Maintain context across chunks
+    - Use tree-sitter for AST-aware chunking
+
+11. **rag:incremental** - Re-indexing MUST be incremental:
+    - Only re-embed changed files
+    - Hash-based change detection
+    - Stale file tracking
+
+### Parser System (parser:*)
+
+12. **parser:spec-extraction** - Specifications MUST be parsed into structured criteria:
+    - Extract security, functionality, and style requirements
+    - Assign unique IDs to each criterion
+    - Preserve original requirement text
+
+13. **parser:category-coverage** - All requirement categories MUST be represented:
+    - Security requirements minimum: 3
+    - Functionality requirements minimum: 3
+    - Style/quality requirements minimum: 2
+
+14. **parser:llm-extraction** - Use LLM for intelligent requirement parsing:
+    - Handle natural language specs
+    - Infer implicit requirements
+    - Deduplicate similar requirements
+
+### Report Generation (report:*)
+
+15. **report:markdown** - Primary output MUST be human-readable Markdown:
+    - Summary table with pass/fail status
+    - Per-criterion breakdown with judge details
+    - Actionable remediation guidance
+
+16. **report:json-verdict** - Machine-readable verdict MUST be JSON:
+    - `verdict.json` for CI/CD integration
+    - Overall pass/fail boolean
+    - Per-criterion scores and status
+
+17. **report:sarif** - Security findings MUST export in SARIF format:
+    - IDE integration for issue highlighting
+    - Location information for each finding
+    - Severity classification
+
+---
+
+## Functional Requirements
+
+### Core Workflow (workflow:*)
+
+18. **workflow:file-tree** - MUST build complete file tree of target project:
+    - Respect `.gitignore` patterns
+    - Configurable include/exclude patterns
+    - Language auto-detection
+
+19. **workflow:criterion-eval** - MUST evaluate each criterion independently:
+    - Select relevant files per criterion (via RAG)
+    - Query all judges for each criterion
+    - Aggregate scores using consensus rules
+
+20. **workflow:fail-fast** - MUST support early termination on critical failures:
+    - Static analysis critical issues abort pipeline
+    - Security veto triggers immediate FAIL
+    - Configurable fail-fast thresholds
+
+21. **workflow:self-verify** - MUST be capable of verifying its own codebase:
+    - No artificial blocks on self-analysis
+    - CVA can analyze dysruption_cva directory
+    - Self-verification proves the system works
+
+### API Endpoints (api:*)
+
+22. **api:submit** - POST endpoint for verification requests:
+    - Accept target directory path
+    - Optional spec file override
+    - Return job ID for async tracking
+
+23. **api:status** - GET endpoint for job status:
+    - Running, completed, failed states
+    - Progress percentage if available
+    - Estimated time remaining
+
+24. **api:results** - GET endpoint for verification results:
+    - Full verdict JSON
+    - Report markdown content
+    - SARIF findings
+
+25. **api:websocket** - Real-time streaming of verification progress:
+    - Criterion-by-criterion updates
+    - Judge responses as they arrive
+    - Token for session authentication
+
+### Error Handling (error:*)
+
+26. **error:graceful-degradation** - MUST continue on non-critical failures:
+    - Single judge timeout doesn't fail entire criterion
+    - Missing optional features don't block verification
+    - Clear warnings for degraded mode
+
+27. **error:retry-logic** - LLM API calls MUST retry on transient failures:
+    - Exponential backoff
+    - Maximum retry count (configurable)
+    - Different errors get different retry strategies
+
+28. **error:logging** - All errors MUST be logged with context:
+    - Stack traces for unexpected errors
+    - Request/response for API failures
+    - Correlation IDs for tracing
+
+---
+
+## Security Requirements
+
+### Secret Management (secret:*)
+
+29. **secret:env-vars** - API keys MUST come from environment variables:
+    - ANTHROPIC_API_KEY for Claude
+    - OPENAI_API_KEY for GPT models
+    - GOOGLE_API_KEY for Gemini
+    - DEEPSEEK_API_KEY for DeepSeek
+
+30. **secret:no-logging** - Secrets MUST NOT appear in logs or outputs:
+    - Mask API keys in debug output
+    - Don't include keys in error messages
+    - No secrets in git-tracked files
+
+### Input Validation (input:*)
+
+31. **input:path-validation** - Target paths MUST be validated:
+    - Absolute paths required
+    - Path traversal prevention
+    - Existence check before processing
+
+32. **input:spec-sanitization** - Spec content MUST be sanitized:
+    - No code execution from spec files
+    - Size limits on input
+    - Encoding validation
+
+---
+
+## Code Quality Requirements
+
+### Style (style:*)
+
+33. **style:pep8** - Python code MUST follow PEP 8 guidelines:
+    - Line length max 100 characters
+    - Consistent indentation (4 spaces)
+    - Proper naming conventions
+
+34. **style:type-hints** - Public functions MUST have type annotations:
+    - Parameter types specified
+    - Return types specified
+    - Complex types use typing module
+
+35. **style:docstrings** - Public functions and classes MUST have docstrings:
+    - Purpose description
+    - Parameter documentation
+    - Return value documentation
+
+### Testing (test:*)
+
+36. **test:unit-coverage** - Critical paths MUST have unit tests:
+    - Parser logic tested
+    - Tribunal scoring tested
+    - Report generation tested
+
+37. **test:integration** - End-to-end workflow MUST be tested:
+    - Sample project verification
+    - API endpoint testing
+    - RAG index building
+
+38. **test:fixtures** - Tests MUST use fixtures for isolation:
+    - Mock LLM responses
+    - Temporary directories
+    - Test database isolation
+
+---
+
+## Performance Requirements
+
+### Efficiency (perf:*)
+
+39. **perf:parallel-judges** - Judge queries SHOULD run in parallel:
+    - Multiple judges queried concurrently
+    - Result aggregation after all complete
+    - Timeout handling per judge
+
+40. **perf:caching** - Expensive operations SHOULD be cached:
+    - LLM responses for identical prompts
+    - Embedding vectors for unchanged files
+    - Parsed spec criteria
+
+41. **perf:token-budget** - LLM context MUST respect token limits:
+    - Chunk large files to fit context
+    - Prioritize relevant code sections
+    - Summarize when necessary
+
+---
+
+## Integration Requirements
+
+### CI/CD (cicd:*)
+
+42. **cicd:exit-codes** - MUST return appropriate exit codes:
+    - 0 for PASS
+    - 1 for FAIL
+    - 2 for ERROR (configuration/runtime issues)
+
+43. **cicd:github-actions** - MUST support GitHub Actions integration:
+    - Action workflow example provided
+    - PR comment with results
+    - Status check integration
+
+44. **cicd:artifact-upload** - MUST produce uploadable artifacts:
+    - verdict.json for machine parsing
+    - REPORT.md for human review
+    - verdict.sarif for IDE integration
+
+---
+
+## Self-Improvement Capabilities
+
+### Remediation (heal:*)
+
+45. **heal:suggestions** - MUST provide actionable fix suggestions:
+    - Specific code changes recommended
+    - Location information included
+    - Priority/severity ranking
+
+46. **heal:patch-generation** - SHOULD generate patch files for fixes:
+    - Unified diff format
+    - Apply with standard patch tools
+    - Preserve context
+
+47. **heal:iterative** - SHOULD support iterative refinement:
+    - Re-run after fixes applied
+    - Track improvement over iterations
+    - Converge on passing state
+
+---
+
+## Constitution (Behavioral Principles)
+
+The CVA operates under these guiding principles:
+
+1. **Fidelity over Leniency**: When evaluating, prefer accurate assessment over generous scoring.
+   A false positive (flagging good code) is better than a false negative (missing bad code).
+
+2. **Evidence-Based Scoring**: Scores MUST be justified by visible code evidence.
+   "Cannot determine" with low confidence beats "probably fine" with high confidence.
+
+3. **Self-Verification is Validation**: The ability to verify itself proves the system works.
+   If CVA cannot analyze CVA, it cannot be trusted to analyze anything.
+
+4. **Universal Applicability**: The system should work on ANY codebase, not just specific languages
+   or frameworks. Spec-driven, not hardcoded.
+
+5. **Persistent Vigilance**: CVA is designed to run continuously, catching regressions and
+   ensuring ongoing compliance. It is a guardian, not a one-time gate.
+
+6. **Transparent Reasoning**: All judgments must be explainable. Black-box verdicts are rejected.
+   Users must understand WHY code passed or failed.
+
+7. **Collaborative Self-Improvement**: CVA should help developers fix issues, not just flag them.
+   The goal is better code, not punishment.
+
+---
+
+*This specification describes what CVA should be. CVA should be able to verify itself against this spec.*

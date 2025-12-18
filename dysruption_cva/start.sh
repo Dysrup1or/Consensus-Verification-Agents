@@ -1,23 +1,95 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Use Railway's injected PORT (required for public networking).
-# Railway's proxy expects the app to listen on the injected PORT.
-# If we override it, Railway can't route traffic and kills the container.
+# =============================================================================
+# CVA Backend Startup Script
+# =============================================================================
+# This script starts the FastAPI backend with proper configuration for Railway.
 #
-# To set a consistent port:
-# 1. Add PORT=8001 as a service variable in Railway Dashboard for the backend
-# 2. Set CVA_BACKEND_URL=http://<backend>.railway.internal:8001 in the UI
-#
-# If PORT is not set, default to 8001 for local development.
+# Environment Variables:
+#   PORT                    - Port to listen on (Railway injects this)
+#   HOST                    - Host to bind (default: 0.0.0.0)
+#   CVA_WORKERS             - Number of Uvicorn workers (default: 1)
+#   CVA_LOG_LEVEL           - Log level: debug, info, warning, error (default: info)
+#   CVA_TIMEOUT_KEEP_ALIVE  - HTTP keep-alive timeout in seconds (default: 30)
+#   CVA_TIMEOUT_GRACEFUL    - Graceful shutdown timeout in seconds (default: 30)
+#   CVA_PRODUCTION          - Enable production mode (default: false)
+#   CVA_API_TOKEN           - Required in production mode
+#   DATABASE_URL            - Required in production/Railway
+# =============================================================================
+
+# Configuration with defaults
 PORT="${PORT:-8001}"
+HOST="${HOST:-0.0.0.0}"
+WORKERS="${CVA_WORKERS:-1}"
+LOG_LEVEL="${CVA_LOG_LEVEL:-info}"
+TIMEOUT_KEEP_ALIVE="${CVA_TIMEOUT_KEEP_ALIVE:-30}"
+TIMEOUT_GRACEFUL="${CVA_TIMEOUT_GRACEFUL:-30}"
 
-# Use 0.0.0.0 for IPv4 binding (works reliably with Uvicorn CLI).
-HOST="0.0.0.0"
+# =============================================================================
+# Startup Banner
+# =============================================================================
+echo "========================================"
+echo "[CVA] Starting CVA Backend"
+echo "[CVA] Version: 1.2.0"
+echo "========================================"
+echo "[CVA] PORT=${PORT}"
+echo "[CVA] HOST=${HOST}"
+echo "[CVA] WORKERS=${WORKERS}"
+echo "[CVA] LOG_LEVEL=${LOG_LEVEL}"
+echo "[CVA] TIMEOUT_KEEP_ALIVE=${TIMEOUT_KEEP_ALIVE}s"
+echo "[CVA] TIMEOUT_GRACEFUL=${TIMEOUT_GRACEFUL}s"
+echo "[CVA] RAILWAY_ENVIRONMENT=${RAILWAY_ENVIRONMENT:-not_set}"
+echo "[CVA] RAILWAY_PRIVATE_DOMAIN=${RAILWAY_PRIVATE_DOMAIN:-not_set}"
+echo "[CVA] CVA_PRODUCTION=${CVA_PRODUCTION:-false}"
+echo "[CVA] DATABASE_URL=${DATABASE_URL:+SET (hidden)}"
+echo "[CVA] CVA_API_TOKEN=${CVA_API_TOKEN:+SET (hidden)}"
+echo "========================================"
 
-echo "[start.sh] Starting CVA API on ${HOST}:${PORT}"
-echo "[start.sh] RAILWAY_ENVIRONMENT=${RAILWAY_ENVIRONMENT:-not_set}"
-echo "[start.sh] RAILWAY_PRIVATE_DOMAIN=${RAILWAY_PRIVATE_DOMAIN:-not_set}"
+# =============================================================================
+# Pre-flight Checks (Production Only)
+# =============================================================================
+if [[ "${CVA_PRODUCTION:-false}" == "true" ]]; then
+    echo "[CVA] Production mode enabled, validating configuration..."
+    
+    MISSING=""
+    
+    # Check required variables
+    if [[ -z "${DATABASE_URL:-}" ]]; then
+        MISSING="${MISSING}DATABASE_URL "
+    fi
+    
+    if [[ -z "${CVA_API_TOKEN:-}" ]]; then
+        MISSING="${MISSING}CVA_API_TOKEN "
+    fi
+    
+    if [[ -n "${MISSING}" ]]; then
+        echo "========================================"
+        echo "[CVA] FATAL: Missing required environment variables:"
+        echo "[CVA]   ${MISSING}"
+        echo "[CVA] "
+        echo "[CVA] To fix:"
+        echo "[CVA]   1. Go to Railway Dashboard"
+        echo "[CVA]   2. Select the Backend service"
+        echo "[CVA]   3. Go to Variables tab"
+        echo "[CVA]   4. Add the missing variables"
+        echo "========================================"
+        exit 1
+    fi
+    
+    echo "[CVA] Production validation passed"
+fi
 
-# Run the CVA FastAPI server.
-exec python -m uvicorn modules.api:app --host "${HOST}" --port "${PORT}"
+# =============================================================================
+# Start Uvicorn
+# =============================================================================
+echo "[CVA] Starting Uvicorn..."
+
+exec python -m uvicorn modules.api:app \
+    --host "${HOST}" \
+    --port "${PORT}" \
+    --workers "${WORKERS}" \
+    --log-level "${LOG_LEVEL}" \
+    --timeout-keep-alive "${TIMEOUT_KEEP_ALIVE}" \
+    --timeout-graceful-shutdown "${TIMEOUT_GRACEFUL}" \
+    --access-log

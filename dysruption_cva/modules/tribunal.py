@@ -38,11 +38,47 @@ from .schemas import (
     VerdictStatus,
 )
 
+# SARIF export support (Phase 1 enhancement)
+try:
+    from .sarif_export import save_sarif, SarifExporter
+    SARIF_AVAILABLE = True
+except ImportError:
+    SARIF_AVAILABLE = False
+    logger.debug("SARIF export not available")
+
+# RAG integration support (Phase 2 enhancement)
+try:
+    from .rag_integration import RAGIntegration, is_rag_available
+    RAG_AVAILABLE = is_rag_available()
+except ImportError:
+    RAG_AVAILABLE = False
+    logger.debug("RAG integration not available")
+
+# Security module for prompt injection protection
+try:
+    from .security import (
+        get_security_manager,
+        ThreatLevel,
+        create_secure_prompt,
+        sanitize_user_content_for_llm,
+    )
+    SECURITY_AVAILABLE = True
+except ImportError:
+    SECURITY_AVAILABLE = False
+    logger.debug("Security module not available, prompt protection disabled")
+
 try:
     import litellm
+    # Suppress LiteLLM's verbose logging for Redis connection failures
+    import logging
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    
     # Enable LiteLLM caching if Redis available
     try:
         import redis
+        # Test connection first before configuring
+        test_client = redis.Redis(host="localhost", port=6379, socket_connect_timeout=1)
+        test_client.ping()
         litellm.cache = litellm.Cache(type="redis", host="localhost", port=6379)
         logger.info("LiteLLM Redis cache enabled")
     except Exception:
@@ -77,8 +113,12 @@ SECURITY_VETO_ENABLED = True
 
 # Fail-Fast Static Analysis Constants
 FAIL_FAST_ENABLED = True
-CRITICAL_PYLINT_TYPES = {"error", "fatal"}
+# Only 'fatal' triggers fail-fast - syntax errors that prevent execution
+# 'error' type includes import-error (E0401) which are environment-specific false positives
+CRITICAL_PYLINT_TYPES = {"fatal"}
 CRITICAL_BANDIT_SEVERITIES = {"HIGH"}
+# Paths that should be excluded from fail-fast (sample/test code may have intentional issues)
+FAIL_FAST_EXCLUDE_PATTERNS = {"sample_project", "tests", "__pycache__", "test_"}
 
 
 # ============================================================================
@@ -162,11 +202,40 @@ Be STRICT and THOROUGH. Score 7+ means the code meets the requirement with good 
 SECURITY_SYSTEM_PROMPT: str = """You are an EXPERT SECURITY AUDITOR and EFFICIENCY ANALYST (DeepSeek V3).
 Your role is to identify security vulnerabilities, performance bottlenecks, and efficiency issues.
 
+## CRITICAL: HONEST ASSESSMENT PRINCIPLE
+Your primary duty is TRUTHFUL EVALUATION. Do not give passing scores to code that clearly fails requirements.
+
+### Distinguishing "Missing Context" from "Missing Feature":
+
+**MISSING CONTEXT** (Score 7 with low confidence):
+- You see API endpoints but not the auth middleware → auth MIGHT exist elsewhere
+- You see function calls to validation utilities not shown → validation MIGHT exist
+- Code references imports/modules not included in context → those modules MIGHT implement the feature
+
+**MISSING FEATURE** (Score 2-4):
+- Requirement asks for JWT auth, but code uses no authentication at all
+- Requirement asks for bcrypt hashing, but you see plaintext password storage
+- Requirement asks for rate limiting, but code has no rate limiting logic anywhere
+- The codebase is clearly a DIFFERENT APPLICATION than what the spec describes
+
+### When to Score Low:
+- **The spec describes Feature X, but the code is clearly for a different purpose**
+- **You can see the entire relevant codebase and Feature X is absent**
+- **The code actively violates the requirement** (not just omits it)
+
+### Confidence Calibration:
+- High confidence (0.8+): You see clear evidence FOR or AGAINST compliance
+- Medium confidence (0.5-0.7): Partial context, some uncertainty
+- Low confidence (<0.5): Severely limited context, mostly guessing
+
+**Principle**: Fidelity to truth matters more than passing scores.
+A false positive (flagging good code) is recoverable. A false negative (blessing bad code) is dangerous.
+
 ## SCORING RUBRIC (1-10):
 - **10**: No vulnerabilities, optimal performance, production-ready
 - **9**: Secure with minor optimizations possible
 - **8**: Good security posture, acceptable performance
-- **7**: Adequately secure, meets performance requirements
+- **7**: Adequately secure, meets performance requirements (DEFAULT if code not visible)
 - **6**: Minor vulnerabilities or performance concerns
 - **5**: Security gaps or notable inefficiencies
 - **4**: Multiple vulnerabilities or significant performance issues
@@ -240,7 +309,84 @@ def get_user(id):
 }
 ```
 
-Focus on REAL security risks and MEASURABLE inefficiencies. Score 7+ means acceptable security/efficiency."""
+## ADDITIONAL FEW-SHOT: HANDLING INCOMPLETE CONTEXT
+
+**Requirement**: "The system MUST validate all user input"
+
+**Code Sample** (LIMITED CONTEXT - only API endpoint shown):
+```python
+@app.post("/submit")
+async def submit_data(data: SubmitRequest):
+    result = await process_submission(data)
+    return {"status": "ok", "id": result.id}
+```
+
+**CORRECT Output** (when validation code might exist elsewhere):
+```json
+{
+    "score": 7,
+    "explanation": "Cannot determine input validation from provided context. The API uses Pydantic (SubmitRequest), which provides automatic validation. No explicit security vulnerabilities observed in this snippet.",
+    "issues": [],
+    "suggestions": [
+        "Consider showing the SubmitRequest model definition for full validation review"
+    ],
+    "confidence": 0.60
+}
+```
+
+## FEW-SHOT: WHEN FEATURE IS CLEARLY ABSENT
+
+**Requirement**: "Implement JWT-based authentication for all API endpoints"
+
+**Code Sample** (This is a CLI tool, not a web API):
+```python
+# cva.py - Consensus Verifier Agent CLI
+import argparse
+from modules.tribunal import Tribunal
+from modules.watcher import build_file_tree
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dir', required=True)
+    args = parser.parse_args()
+    
+    tribunal = Tribunal(config)
+    result = tribunal.run(file_tree, spec)
+    print(f"Verdict: {result.verdict}")
+
+if __name__ == "__main__":
+    main()
+```
+
+**CORRECT Output** (code is for different purpose than spec):
+```json
+{
+    "score": 2,
+    "explanation": "This is a CLI verification tool, not a web API. The requirement asks for JWT authentication for API endpoints, but this codebase does not implement API endpoints - it is a command-line application for code analysis. The spec and code are misaligned.",
+    "issues": [
+        "Code is a CLI tool, not a web API as specified",
+        "No HTTP endpoints exist to apply JWT authentication to",
+        "No authentication mechanism of any kind present"
+    ],
+    "suggestions": [
+        "Verify the correct target directory/spec combination is being used",
+        "If this IS the target code, add a web API layer with Flask/FastAPI",
+        "Implement JWT middleware once API endpoints exist"
+    ],
+    "confidence": 0.95
+}
+```
+
+**WRONG Output** (blindly passing with "cannot determine"):
+```json
+{
+    "score": 7,
+    "explanation": "Cannot determine JWT implementation from provided context.",
+    "confidence": 0.70
+}
+```
+
+Focus on REAL security risks and MEASURABLE inefficiencies. Be HONEST about mismatches between spec and code."""
 
 
 USER_PROXY_SYSTEM_PROMPT: str = """You are a USER ADVOCATE and SPECIFICATION ALIGNMENT CHECKER (Gemini 2.5 Pro).
@@ -471,12 +617,19 @@ class Tribunal:
         self.static_config = self.config.get("static_analysis", {})
         self.remediation_config = self.config.get("remediation", {})
         self.fallback_config = self.config.get("fallback", {})
+        self.timeouts_config = self.config.get("timeouts", {})
 
         # Thresholds
         self.pass_score = self.thresholds.get("pass_score", 7)
         self.consensus_ratio = self.thresholds.get("consensus_ratio", 0.67)
         self.chunk_size_tokens = self.thresholds.get("chunk_size_tokens", 10000)
         self.context_window = self.thresholds.get("context_window", 128000)
+        self.veto_confidence = self.thresholds.get("veto_confidence", VETO_CONFIDENCE_THRESHOLD)
+
+        # Timeouts (with sensible defaults)
+        self.timeout_llm_request = self.timeouts_config.get("llm_request_seconds", 60)
+        self.timeout_pylint = self.timeouts_config.get("static_pylint_seconds", 30)
+        self.timeout_bandit = self.timeouts_config.get("static_bandit_seconds", 30)
 
         # Retry settings
         self.max_attempts = self.retry_config.get("max_attempts", 3)
@@ -514,12 +667,16 @@ class Tribunal:
             },
         }
 
-        # Veto protocol settings
-        self.veto_confidence_threshold = VETO_CONFIDENCE_THRESHOLD
+        # Veto protocol settings - use config value, fallback to constant
+        self.veto_confidence_threshold = self.veto_confidence
         self.security_veto_enabled = SECURITY_VETO_ENABLED
 
         # Fail-fast settings
         self.fail_fast_enabled = self.static_config.get("fail_fast", FAIL_FAST_ENABLED)
+
+        # RAG integration for semantic file selection
+        self._rag: Optional[RAGIntegration] = None
+        self._project_root: Optional[Path] = None
 
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from YAML file."""
@@ -534,6 +691,60 @@ class Tribunal:
         except Exception as e:
             logger.error(f"Error loading config: {e}")
             return {}
+
+    def set_project_root(self, project_root: Path) -> None:
+        """Set the project root and initialize RAG if available."""
+        self._project_root = project_root
+        if RAG_AVAILABLE:
+            try:
+                self._rag = RAGIntegration(project_root)
+                logger.info(f"RAG semantic search enabled for {project_root}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize RAG: {e}")
+                self._rag = None
+
+    def _select_relevant_files(
+        self,
+        criterion: Dict,
+        file_tree: Dict[str, str],
+        max_files: int = 10,
+    ) -> List[Tuple[str, str]]:
+        """
+        Select files most relevant to a criterion using semantic search if available.
+        Falls back to token-budget ordering if RAG not available.
+        """
+        # Try semantic search first
+        if self._rag is not None:
+            try:
+                # Use criterion description as the query
+                query = criterion.get("desc", "") + " " + criterion.get("rationale", "")
+                scores = self._rag.score_files_for_criterion(query, list(file_tree.keys()))
+                
+                # Sort by semantic similarity and take top files
+                sorted_files = sorted(scores, key=lambda x: x.similarity_score, reverse=True)
+                selected = []
+                for score_result in sorted_files[:max_files]:
+                    if score_result.rel_path in file_tree:
+                        selected.append((score_result.rel_path, file_tree[score_result.rel_path]))
+                
+                if selected:
+                    logger.debug(f"RAG selected {len(selected)} files for criterion: {[s[0] for s in selected]}")
+                    return selected
+            except Exception as e:
+                logger.warning(f"RAG file selection failed: {e}, falling back to default")
+        
+        # Fallback: select files until token budget exhausted
+        selected = []
+        total_tokens = 0
+        for file_path, content in file_tree.items():
+            file_tokens = self._estimate_tokens(content)
+            if total_tokens + file_tokens < self.chunk_size_tokens:
+                selected.append((file_path, content))
+                total_tokens += file_tokens
+                if len(selected) >= max_files:
+                    break
+        
+        return selected
 
     def _estimate_tokens(self, text: str) -> int:
         """Rough token estimation (4 chars per token)."""
@@ -630,7 +841,7 @@ class Tribunal:
                 temp_path = f.name
 
             try:
-                # Run pylint
+                # Run pylint with configurable timeout
                 disabled = self.static_config.get("pylint", {}).get("disable", [])
                 disable_str = ",".join(disabled) if disabled else ""
 
@@ -639,14 +850,16 @@ class Tribunal:
                     cmd.append(f"--disable={disable_str}")
                 cmd.append(temp_path)
 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_pylint)
 
                 if result.stdout:
                     try:
                         pylint_output = json.loads(result.stdout)
                         for issue in pylint_output:
                             issue_type = issue.get("type", "warning")
-                            is_critical = issue_type in CRITICAL_PYLINT_TYPES
+                            # Check if file is in excluded path for fail-fast
+                            is_excluded = any(pattern in file_path for pattern in FAIL_FAST_EXCLUDE_PATTERNS)
+                            is_critical = (issue_type in CRITICAL_PYLINT_TYPES) and not is_excluded
 
                             issues.append(
                                 {
@@ -720,17 +933,19 @@ class Tribunal:
                 temp_path = f.name
 
             try:
-                # Run bandit
+                # Run bandit with configurable timeout
                 cmd = ["python", "-m", "bandit", "-f", "json", temp_path]
 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_bandit)
 
                 if result.stdout:
                     try:
                         bandit_output = json.loads(result.stdout)
                         for issue in bandit_output.get("results", []):
                             severity = issue.get("issue_severity", "LOW").upper()
-                            is_critical = severity in CRITICAL_BANDIT_SEVERITIES
+                            # Check if file is in excluded path for fail-fast
+                            is_excluded = any(pattern in file_path for pattern in FAIL_FAST_EXCLUDE_PATTERNS)
+                            is_critical = (severity in CRITICAL_BANDIT_SEVERITIES) and not is_excluded
 
                             issues.append(
                                 {
@@ -888,7 +1103,7 @@ class Tribunal:
                         messages=messages, 
                         max_tokens=max_tokens, 
                         temperature=0.1,
-                        timeout=60,  # 60 second timeout
+                        timeout=self.timeout_llm_request,  # Configurable timeout
                     )
 
                     content = response.choices[0].message.content
@@ -992,7 +1207,10 @@ class Tribunal:
     def _get_judge_prompt(
         self, judge_key: str, criterion: Dict, code_content: str, spec_summary: str
     ) -> Tuple[str, str]:
-        """Generate system and user prompts for a judge using enhanced v1.1 prompts."""
+        """Generate system and user prompts for a judge using enhanced v1.1 prompts.
+        
+        Security: Code content is sanitized to prevent prompt injection attacks.
+        """
         judge = self.judges[judge_key]
 
         # Use the enhanced rubric-based system prompts
@@ -1001,6 +1219,28 @@ class Tribunal:
             "security": SECURITY_SYSTEM_PROMPT,
             "user_proxy": USER_PROXY_SYSTEM_PROMPT,
         }
+        
+        # Sanitize code content to prevent prompt injection
+        # Users could embed malicious instructions in code comments
+        if SECURITY_AVAILABLE:
+            security_mgr = get_security_manager()
+            
+            # Check threat level of code content
+            threat = security_mgr.analyze_prompt_threat(code_content)
+            if threat.level >= ThreatLevel.HIGH:
+                logger.warning(
+                    f"[TRIBUNAL SECURITY] High threat detected in code content: "
+                    f"{threat.level.name}, patterns: {[p[0] for p in threat.patterns_found]}"
+                )
+            
+            # Sanitize the code content (removes dangerous patterns)
+            sanitized_code = security_mgr.sanitize_for_prompt(
+                code_content, 
+                max_length=50000,  # Allow larger code blocks
+                remove_patterns=True
+            )
+        else:
+            sanitized_code = code_content
 
         user_prompt = f"""Evaluate this code against the following requirement:
 
@@ -1014,7 +1254,7 @@ class Tribunal:
 
 ## CODE TO REVIEW
 ```
-{code_content}
+{sanitized_code}
 ```
 
 ## INSTRUCTIONS
@@ -1039,19 +1279,24 @@ Output your assessment as valid JSON matching the specified schema."""
         """
         Evaluate a single criterion across all relevant files.
         Tracks security judge veto eligibility.
+        Uses RAG semantic search for intelligent file selection when available.
         """
         logger.info(
             f"Evaluating criterion {criterion_type}:{criterion['id']}: "
             f"{criterion['desc'][:50]}..."
         )
 
+        # Select relevant files using semantic search or fallback
+        selected_files = self._select_relevant_files(criterion, file_tree, max_files=10)
+        
+        # Log which files were selected for transparency
+        logger.info(f"Selected files for criterion: {[f[0] for f in selected_files[:5]]}")
+        
         # Combine relevant code content
         code_content = ""
         relevant_files = []
-
-        for file_path, content in file_tree.items():
-            # Check if content might be relevant to criterion
-            # For now, include all files (could be optimized with semantic search)
+        
+        for file_path, content in selected_files:
             if self._estimate_tokens(code_content + content) < self.chunk_size_tokens:
                 code_content += f"\n\n# File: {file_path}\n{content}"
                 relevant_files.append(file_path)
@@ -1766,10 +2011,12 @@ fi
 
         return json_data
 
-    def save_outputs(self, verdict: TribunalVerdict) -> Tuple[str, str]:
-        """Save REPORT.md and verdict.json."""
+    def save_outputs(self, verdict: TribunalVerdict) -> Tuple[str, str, Optional[str]]:
+        """Save REPORT.md, verdict.json, and optionally verdict.sarif."""
         report_path = self.output_config.get("report_file", "REPORT.md")
         verdict_path = self.output_config.get("verdict_file", "verdict.json")
+        sarif_path = self.output_config.get("sarif_file", "verdict.sarif")
+        sarif_enabled = self.output_config.get("sarif_enabled", True)
 
         # Generate and save report
         report_content = self.generate_report_md(verdict)
@@ -1783,7 +2030,24 @@ fi
             json.dump(verdict_json, f, indent=2)
         logger.info(f"Saved verdict to: {verdict_path}")
 
-        return report_path, verdict_path
+        # Generate and save SARIF (if enabled and available)
+        saved_sarif_path = None
+        if sarif_enabled and SARIF_AVAILABLE:
+            try:
+                working_dir = os.getcwd()
+                saved_sarif_path = str(save_sarif(
+                    verdict=verdict,
+                    path=sarif_path,
+                    working_directory=working_dir,
+                    include_passing=False
+                ))
+                logger.info(f"Saved SARIF to: {saved_sarif_path}")
+            except Exception as e:
+                logger.warning(f"Failed to generate SARIF: {e}")
+        elif sarif_enabled and not SARIF_AVAILABLE:
+            logger.debug("SARIF export requested but module not available")
+
+        return report_path, verdict_path, saved_sarif_path
 
 
 def run_adjudication(

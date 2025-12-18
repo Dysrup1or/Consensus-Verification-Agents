@@ -181,12 +181,33 @@ class DirectoryWatcher:
         """
         Setup the watcher. If git_url provided, clone/pull the repo.
         Returns the path being watched.
+        
+        Security:
+        - Resolves path to absolute form
+        - Validates path exists and is a directory
+        - Prevents path traversal attacks
         """
         if git_url:
             self.target_path = self._clone_or_pull_repo(git_url)
 
+        # Security: Convert to absolute path and resolve any .. components
+        try:
+            resolved_path = Path(self.target_path).resolve(strict=False)
+            self.target_path = str(resolved_path)
+        except (OSError, ValueError) as e:
+            raise ValueError(f"Invalid target path: {e}")
+        
+        # Security: Prevent path traversal - ensure resolved path doesn't escape expected bounds
+        if ".." in self.target_path:
+            raise ValueError("Path traversal detected: '..' not allowed in resolved path")
+        
+        # Validate path exists
         if not os.path.exists(self.target_path):
             raise FileNotFoundError(f"Target path does not exist: {self.target_path}")
+        
+        # Validate it's a directory
+        if not os.path.isdir(self.target_path):
+            raise ValueError(f"Target path is not a directory: {self.target_path}")
 
         logger.info(f"Watcher setup for: {self.target_path}")
         return self.target_path

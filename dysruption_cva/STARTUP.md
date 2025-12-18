@@ -1,5 +1,26 @@
 # CVA Startup Guide
 
+## Recommended (local dev): use the repo root startup orchestrator
+
+From the repo root:
+
+```powershell
+cd "c:\Users\alexe\Invariant"
+
+# Start both backend + UI (attached)
+.\startup.ps1
+
+# Or start detached (background) and return control to your shell
+.\startup.ps1 -Detached
+
+# Stop services started by the script
+.\startup.ps1 -Action Stop
+```
+
+Notes:
+- This is intended for **local development only**.
+- Production startup is handled by Railway service configuration (`dysruption_cva/start.sh` for API, `npm start` for UI) and should not rely on local PowerShell orchestration.
+
 ## Quick Start (TL;DR)
 
 **Open two separate PowerShell windows:**

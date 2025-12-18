@@ -58,6 +58,16 @@ Thumbs.db
 # Uploaded user files (handled per-subdirectory)
 # Note: dysruption_cva/temp_uploads/ is ignored in that dir's .gitignore
 
+# Root temp uploads (never commit)
+temp_uploads/*
+!temp_uploads/.gitkeep
+
+# Generated reports / scans (never commit)
+*.sarif
+verification_report.*
+pytest_results.txt
+file_tree.json
+
 # Defense-in-depth: ignore upload/artifact dirs even if nested ignore changes
 # Note: ignore contents, but allow keeping a tracked .gitkeep.
 dysruption_cva/temp_uploads/*

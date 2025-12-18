@@ -43,6 +43,18 @@ except Exception:  # pragma: no cover
     from modules.dependency_resolver import ResolverConfig  # type: ignore
     from modules.dependency_resolver import resolve_dependencies  # type: ignore
 
+# Optional RAG integration for semantic file scoring
+_RAG_AVAILABLE = False
+try:
+    from .rag_integration import sync_enhance_risk_scores, RAGConfig
+    _RAG_AVAILABLE = True
+except ImportError:
+    try:
+        from modules.rag_integration import sync_enhance_risk_scores, RAGConfig  # type: ignore
+        _RAG_AVAILABLE = True
+    except ImportError:
+        pass
+
 
 _MAX_FILE_BYTES_DEFAULT = 512 * 1024  # 512KB safety cap for context building
 
@@ -597,6 +609,8 @@ def build_llm_context(
     constitution_text: str,
     token_budget: int,
     max_file_bytes: int = _MAX_FILE_BYTES_DEFAULT,
+    spec_text: Optional[str] = None,
+    enable_semantic_boost: bool = True,
 ) -> ContextBuildResult:
     plan = plan_context(
         project_root,
@@ -606,6 +620,8 @@ def build_llm_context(
         constitution_text=constitution_text,
         token_budget=token_budget,
         max_file_bytes=max_file_bytes,
+        spec_text=spec_text,
+        enable_semantic_boost=enable_semantic_boost,
     )
     return render_context_plan(
         project_root,
@@ -625,11 +641,24 @@ def plan_context(
     constitution_text: str,
     token_budget: int,
     max_file_bytes: int = _MAX_FILE_BYTES_DEFAULT,
+    spec_text: Optional[str] = None,
+    enable_semantic_boost: bool = True,
 ) -> CoveragePlan:
-    """Phase 1: deterministic coverage planner.
+    """Phase 1: deterministic coverage planner with optional semantic boosting.
 
     Produces a structured plan (manifest + coverage tiers) without reading large
     file contents where avoidable.
+    
+    Args:
+        project_root: Root directory of the project
+        changed_files: List of changed file paths
+        import_files: List of import file paths
+        forced_files: Files to force full coverage
+        constitution_text: Constitution/spec text (used for header)
+        token_budget: Maximum token budget for context
+        max_file_bytes: Maximum file size to process
+        spec_text: Optional specification text for semantic file scoring
+        enable_semantic_boost: If True, use RAG for semantic file boosting
     """
 
     root = project_root.resolve()
@@ -651,6 +680,20 @@ def plan_context(
 
     import_unique = sorted(set(import_unique_input + dep_res.resolved_files))
     candidates = sorted(set(changed_unique + import_unique))
+
+    # RAG-based semantic boosts (Phase 2 enhancement)
+    semantic_boosts: Dict[str, int] = {}
+    if enable_semantic_boost and _RAG_AVAILABLE and spec_text:
+        try:
+            semantic_boosts = sync_enhance_risk_scores(
+                root,
+                spec_text,
+                candidates,
+            )
+            if semantic_boosts:
+                logger.info(f"RAG semantic boost applied to {len(semantic_boosts)} files")
+        except Exception as e:
+            logger.debug(f"RAG semantic boost unavailable: {e}")
 
     # Git signals (best-effort)
     git_new: Set[str] = set()
@@ -746,6 +789,12 @@ def plan_context(
         if sz > 200_000:
             score += 10
             reasons.append("large_file")
+
+        # Phase 2: RAG semantic boost (if available)
+        semantic_boost = semantic_boosts.get(rel, 0)
+        if semantic_boost > 0:
+            score += semantic_boost
+            reasons.append(f"semantic_relevance:{semantic_boost}")
 
         return score, reasons
 

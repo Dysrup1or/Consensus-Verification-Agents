@@ -14,8 +14,10 @@ import os
 import subprocess
 import json
 from pathlib import Path
-from typing import NamedTuple, List, Callable, Optional
+from typing import NamedTuple, List, Callable, Optional, Any, Dict
 from enum import Enum
+
+import yaml
 
 class Status(Enum):
     PASS = "✅"
@@ -55,6 +57,23 @@ REQUIRED_PYTHON_PACKAGES = [
     "bandit",
     "loguru",
 ]
+
+# Load timeouts from config.yaml
+def _load_config() -> Dict[str, Any]:
+    config_path = BACKEND_DIR / "config.yaml"
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except Exception:
+            pass
+    return {}
+
+_CONFIG = _load_config()
+_TIMEOUTS = _CONFIG.get("timeouts", {})
+
+# Timeout values (from config.yaml or defaults)
+PREFLIGHT_PING_TIMEOUT = _TIMEOUTS.get("preflight_ping_seconds", 12)
 
 REQUIRED_BACKEND_FILES = [
     "modules/__init__.py",
@@ -361,7 +380,7 @@ def check_llm_models_accessible() -> CheckResult:
                 messages=messages,
                 max_tokens=1,
                 temperature=0.0,
-                timeout=12,
+                timeout=PREFLIGHT_PING_TIMEOUT,
             )
         except Exception as e:
             et = type(e).__name__

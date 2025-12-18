@@ -82,6 +82,11 @@ run_artifacts/
 # Generated runtime files
 run_history.json
 
+# Local caches/state (high-churn, never commit)
+.cva_cache/
+.tribunal/
+embeddings/
+
 # Test artifacts
 test_upload.zip
 *.zip

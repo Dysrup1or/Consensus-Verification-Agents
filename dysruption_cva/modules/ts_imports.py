@@ -187,6 +187,21 @@ def _dedupe_keep_order(items: Sequence[str], *, limit: int) -> List[str]:
     return out
 
 
+def _run_query_captures(language, tree_root, query_str: str) -> dict:
+    """Run a tree-sitter query and return captures dict.
+    
+    Returns dict mapping capture names to lists of nodes.
+    Compatible with tree-sitter 0.24+ API that uses QueryCursor.
+    """
+    try:
+        from tree_sitter import Query, QueryCursor  # type: ignore
+        query = Query(language, query_str)
+        cursor = QueryCursor(query)
+        return cursor.captures(tree_root)
+    except Exception:
+        return {}
+
+
 def _ts_query_imports(language, tree, source_bytes: bytes) -> List[str]:
     # Covers: static imports, dynamic import("x"), require("x")
     queries = [
@@ -197,17 +212,11 @@ def _ts_query_imports(language, tree, source_bytes: bytes) -> List[str]:
 
     found: List[str] = []
     for q in queries:
-        try:
-            from tree_sitter import Query  # type: ignore
-
-            query = Query(language, q)
-            for node, cap in query.captures(tree.root_node):
-                if cap == "mod":
-                    lit = _strip_quotes(_node_text(source_bytes, node))
-                    if lit:
-                        found.append(lit)
-        except Exception:
-            continue
+        captures = _run_query_captures(language, tree.root_node, q)
+        for node in captures.get("mod", []):
+            lit = _strip_quotes(_node_text(source_bytes, node))
+            if lit:
+                found.append(lit)
 
     return found
 
@@ -227,22 +236,18 @@ def _ts_query_exports(language, tree, source_bytes: bytes) -> List[str]:
     ]
 
     for q in queries:
-        try:
-            from tree_sitter import Query  # type: ignore
-
-            query = Query(language, q)
-            for node, cap in query.captures(tree.root_node):
+        captures = _run_query_captures(language, tree.root_node, q)
+        for cap_name, nodes in captures.items():
+            for node in nodes:
                 txt = _node_text(source_bytes, node).strip()
                 if not txt:
                     continue
-                if cap.startswith("default"):
+                if cap_name.startswith("default"):
                     exports.append(f"default {txt}")
-                elif cap == "alias":
+                elif cap_name == "alias":
                     exports.append(f"as {txt}")
-                else:
+                elif cap_name == "name":
                     exports.append(txt)
-        except Exception:
-            continue
 
     return exports
 
@@ -260,40 +265,35 @@ def _ts_query_signatures(language, tree, source_bytes: bytes) -> List[str]:
     ]
 
     for q in queries:
-        try:
-            from tree_sitter import Query  # type: ignore
-
-            query = Query(language, q)
-            # We need pairing for function name+params; collect per match by reading captures grouped.
-            # tree_sitter.Query doesn't expose match grouping consistently across versions, so we do a best-effort pairing.
-            captures = list(query.captures(tree.root_node))
-            if "formal_parameters" not in q:
-                for node, cap in captures:
-                    if cap == "name":
-                        name = _node_text(source_bytes, node).strip()
-                        if q.startswith("(class_declaration"):
-                            sigs.append(f"class {name}")
-                        elif q.startswith("(interface_declaration"):
-                            sigs.append(f"interface {name}")
-                        elif q.startswith("(type_alias_declaration"):
-                            sigs.append(f"type {name}")
-                        elif q.startswith("(enum_declaration"):
-                            sigs.append(f"enum {name}")
-                continue
-
-            # function query: try to pair nearest params capture after each name capture
-            name_nodes = [n for (n, cap) in captures if cap == "name"]
-            param_nodes = [n for (n, cap) in captures if cap == "params"]
-            for n in name_nodes:
-                name = _node_text(source_bytes, n).strip()
-                params_txt = "()"
-                # pick the closest params that starts after name
-                after = [p for p in param_nodes if p.start_byte >= n.end_byte]
-                if after:
-                    params_txt = _node_text(source_bytes, after[0]).strip() or "()"
-                sigs.append(f"function {name}{params_txt}")
-        except Exception:
+        captures = _run_query_captures(language, tree.root_node, q)
+        if not captures:
             continue
+
+        if "formal_parameters" not in q:
+            # Simple name-only queries
+            for node in captures.get("name", []):
+                name = _node_text(source_bytes, node).strip()
+                if q.startswith("(class_declaration"):
+                    sigs.append(f"class {name}")
+                elif q.startswith("(interface_declaration"):
+                    sigs.append(f"interface {name}")
+                elif q.startswith("(type_alias_declaration"):
+                    sigs.append(f"type {name}")
+                elif q.startswith("(enum_declaration"):
+                    sigs.append(f"enum {name}")
+            continue
+
+        # function query: pair name with nearest params capture
+        name_nodes = captures.get("name", [])
+        param_nodes = captures.get("params", [])
+        for n in name_nodes:
+            name = _node_text(source_bytes, n).strip()
+            params_txt = "()"
+            # pick the closest params that starts after name
+            after = [p for p in param_nodes if p.start_byte >= n.end_byte]
+            if after:
+                params_txt = _node_text(source_bytes, after[0]).strip() or "()"
+            sigs.append(f"function {name}{params_txt}")
 
     return sigs
 

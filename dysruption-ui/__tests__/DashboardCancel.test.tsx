@@ -42,7 +42,9 @@ jest.mock('@/components/Toast', () => {
 });
 
 jest.mock('@/lib/api', () => {
+  const actual = jest.requireActual('@/lib/api');
   return {
+    ...actual,
     startRun: jest.fn(async () => ({ run_id: 'run123', status: 'scanning', message: 'started' })),
     fetchVerdict: jest.fn(async () => ({ ready: false })),
     fetchRuns: jest.fn(async () => ({ runs: [], total: 0 })),
@@ -57,46 +59,6 @@ import Dashboard from '@/app/page';
 import { cancelRun } from '@/lib/api';
 
 describe('Dashboard cancel', () => {
-  beforeEach(() => {
-    (global as any).fetch = jest.fn(async (input: any, init?: any) => {
-      const url = typeof input === 'string' ? input : String(input?.url || input);
-
-      if (url.startsWith('/api/github/repos')) {
-        return {
-          ok: true,
-          json: async () => ({
-            repos: [
-              { id: 1, full_name: 'acme/repo', private: false, default_branch: 'main' },
-            ],
-          }),
-        } as any;
-      }
-
-      if (url.startsWith('/api/github/branches')) {
-        return {
-          ok: true,
-          json: async () => ({
-            branches: [{ name: 'main', protected: false }],
-          }),
-        } as any;
-      }
-
-      if (url.startsWith('/api/github/import') && (init?.method || 'GET') === 'POST') {
-        return {
-          ok: true,
-          json: async () => ({
-            targetPath: '/tmp/upload_123',
-            fileCount: 3,
-            repo: 'acme/repo',
-            ref: 'main',
-          }),
-        } as any;
-      }
-
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-  });
-
   afterEach(() => {
     jest.clearAllMocks();
   });

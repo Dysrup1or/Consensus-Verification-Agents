@@ -4,13 +4,41 @@ import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 
 def _normalized_database_url(raw: str) -> str:
+    """
+    Normalize DATABASE_URL for SQLAlchemy async drivers.
+    
+    Behavior:
+    - Production/Railway: REQUIRES DATABASE_URL, fails if missing
+    - Local development: Falls back to SQLite with warning
+    
+    Raises:
+        RuntimeError: If DATABASE_URL is missing in production/Railway
+    """
     raw = (raw or "").strip()
+    
     if not raw:
-        # Safe default for local/dev.
+        # Check if we're in production or Railway
+        is_production = os.getenv("CVA_PRODUCTION", "false").lower() == "true"
+        is_railway = bool(os.getenv("RAILWAY_ENVIRONMENT"))
+        
+        if is_production or is_railway:
+            raise RuntimeError(
+                "DATABASE_URL environment variable is required in production/Railway. "
+                "Please link a PostgreSQL database to this service in Railway Dashboard, "
+                "or set DATABASE_URL manually. "
+                f"(CVA_PRODUCTION={is_production}, RAILWAY_ENVIRONMENT={os.getenv('RAILWAY_ENVIRONMENT', 'not_set')})"
+            )
+        
+        # Local development: allow SQLite with warning
+        logger.warning(
+            "DATABASE_URL not set. Using SQLite for local development. "
+            "This is NOT suitable for production - data will be lost on restart."
+        )
         return "sqlite+aiosqlite:///./cva_dev.db"
 
     # Railway Postgres typically provides DATABASE_URL (postgresql://...).
@@ -19,6 +47,7 @@ def _normalized_database_url(raw: str) -> str:
         return raw.replace("postgresql://", "postgresql+asyncpg://", 1)
     if raw.startswith("postgres://"):
         return raw.replace("postgres://", "postgresql+asyncpg://", 1)
+    
     return raw
 
 

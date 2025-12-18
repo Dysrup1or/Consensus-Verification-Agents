@@ -336,18 +336,66 @@ class ConstitutionParser:
             logger.error(f"Error loading config: {e}")
             return {}
 
+    # Security: Maximum spec file size (1MB) to prevent DoS
+    MAX_SPEC_SIZE_BYTES = 1 * 1024 * 1024
+    
+    # Security: Patterns that could indicate code execution attempts
+    DANGEROUS_PATTERNS = [
+        "__import__",
+        "eval(",
+        "exec(",
+        "compile(",
+        "os.system",
+        "subprocess",
+        "<script",
+        "javascript:",
+    ]
+    
     def read_spec(self, spec_path: str = "spec.txt") -> str:
-        """Read the specification file."""
-        spec_file = Path(spec_path)
+        """Read and sanitize the specification file.
+        
+        Security:
+        - Enforces size limits to prevent DoS
+        - Validates UTF-8 encoding
+        - Detects potential code execution patterns
+        - Resolves path to prevent traversal
+        """
+        # Security: Resolve to absolute path to prevent traversal
+        spec_file = Path(spec_path).resolve()
+        
+        # Security: Check for path traversal attempts
+        if ".." in str(spec_file):
+            raise ValueError("Path traversal detected in spec path")
 
         if not spec_file.exists():
             raise FileNotFoundError(f"Specification file not found: {spec_path}")
-
-        with open(spec_file, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-
-        if not content:
+        
+        # Security: Check file size before reading
+        file_size = spec_file.stat().st_size
+        if file_size > self.MAX_SPEC_SIZE_BYTES:
+            raise ValueError(
+                f"Specification file too large: {file_size} bytes "
+                f"(max: {self.MAX_SPEC_SIZE_BYTES} bytes)"
+            )
+        
+        if file_size == 0:
             raise ValueError(f"Specification file is empty: {spec_path}")
+
+        # Security: Read with explicit UTF-8 encoding, fail on decode errors
+        try:
+            with open(spec_file, "r", encoding="utf-8", errors="strict") as f:
+                content = f.read().strip()
+        except UnicodeDecodeError as e:
+            raise ValueError(f"Invalid encoding in spec file (must be UTF-8): {e}")
+        
+        # Security: Check for dangerous patterns that could indicate code injection
+        content_lower = content.lower()
+        for pattern in self.DANGEROUS_PATTERNS:
+            if pattern.lower() in content_lower:
+                logger.warning(
+                    f"Potentially dangerous pattern '{pattern}' found in spec file - "
+                    "spec content is used as text only, not executed"
+                )
 
         logger.info(f"Read spec file: {spec_path} ({len(content)} chars)")
         return content

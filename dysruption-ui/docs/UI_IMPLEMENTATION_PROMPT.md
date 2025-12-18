@@ -1,5 +1,7 @@
 # Dysruption UI — Implementation Prompt (Single-screen Vibecoder Dashboard)
 
+> **Canonical note (2025-12-18):** This was a point-in-time implementation prompt. The repo’s consolidated plan-of-record is now `INVARIANT_UI_EXECUTION_ARTIFACT.md`.
+
 You are implementing UI changes in the existing Next.js (App Router) + Tailwind project under `dysruption-ui/`.
 
 ## Hard constraints (do not violate)

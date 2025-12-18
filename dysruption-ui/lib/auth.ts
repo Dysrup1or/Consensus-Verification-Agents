@@ -1,6 +1,7 @@
 import type { NextAuthOptions } from 'next-auth';
 import GoogleProvider from 'next-auth/providers/google';
 import GitHubProvider from 'next-auth/providers/github';
+import { resolveNextAuthSecret } from './authEnv';
 
 const providers = [];
 
@@ -31,7 +32,7 @@ if (process.env.GITHUB_ID && process.env.GITHUB_SECRET) {
 
 export const authOptions: NextAuthOptions = {
   providers,
-  secret: process.env.NEXTAUTH_SECRET,
+  secret: resolveNextAuthSecret(),
   debug: process.env.NEXTAUTH_DEBUG?.toLowerCase() === 'true',
   session: { strategy: 'jwt' },
   pages: {

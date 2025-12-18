@@ -440,7 +440,11 @@ output:
             )
 
             tribunal = Tribunal(str(config_path))
-            report_path, verdict_path = tribunal.save_outputs(sample_verdict)
+            result = tribunal.save_outputs(sample_verdict)
+            
+            # save_outputs returns (report_path, verdict_path, sarif_path)
+            report_path = result[0]
+            verdict_path = result[1]
 
             assert os.path.exists(report_path)
             assert os.path.exists(verdict_path)
