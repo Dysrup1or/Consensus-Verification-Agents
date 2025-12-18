@@ -23,6 +23,13 @@ function resolveBackendBaseUrl(): string {
     baseUrl = `${shouldUseHttp ? 'http' : 'https'}://${baseUrl}`;
   }
 
+  // CRITICAL: Railway internal domains MUST use http://, not https://
+  // Fix incorrect https:// prefix for .railway.internal domains
+  if (baseUrl.includes('.railway.internal') && baseUrl.startsWith('https://')) {
+    baseUrl = baseUrl.replace(/^https:\/\//, 'http://');
+    console.warn('[CVA Proxy] Corrected https:// to http:// for Railway internal domain');
+  }
+
   // For Railway internal domains, append port if not already present and we have one
   // This is CRITICAL: Railway private networking REQUIRES explicit port specification
   // https://docs.railway.com/guides/private-networking#use-internal-hostname-and-port

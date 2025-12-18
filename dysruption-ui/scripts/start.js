@@ -5,7 +5,9 @@ const hostname = process.env.HOSTNAME;
 
 console.log(`[start.js] Starting Next.js on port ${port}`);
 console.log(`[start.js] CVA_BACKEND_URL=${process.env.CVA_BACKEND_URL || 'NOT SET'}`);
+console.log(`[start.js] CVA_BACKEND_PORT=${process.env.CVA_BACKEND_PORT || 'NOT SET'}`);
 console.log(`[start.js] CVA_API_TOKEN=${process.env.CVA_API_TOKEN ? 'SET' : 'NOT SET'}`);
+console.log(`[start.js] NODE_ENV=${process.env.NODE_ENV || 'NOT SET'}`);
 
 const child = spawn(
   process.execPath,
