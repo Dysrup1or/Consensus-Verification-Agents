@@ -20,9 +20,11 @@ set -euo pipefail
 
 # Configuration with defaults
 PORT="${PORT:-8001}"
-# Bind to 0.0.0.0 for Railway - this works for both public and private networking
-# Railway's edge proxy connects via IPv4, and private networking works with either
-HOST="${HOST:-0.0.0.0}"
+# For Railway private networking (legacy environments), must bind to IPv6
+# Railway docs: "uvicorn app:app --host :: --port ${PORT}"
+# Legacy environments (created before Oct 16, 2025) only support IPv6
+# Set HOST=0.0.0.0 to override for local development
+HOST="${HOST:-::}"
 WORKERS="${CVA_WORKERS:-1}"
 LOG_LEVEL="${CVA_LOG_LEVEL:-info}"
 TIMEOUT_KEEP_ALIVE="${CVA_TIMEOUT_KEEP_ALIVE:-30}"
