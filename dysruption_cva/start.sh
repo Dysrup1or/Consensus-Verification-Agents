@@ -20,9 +20,9 @@ set -euo pipefail
 
 # Configuration with defaults
 PORT="${PORT:-8001}"
-# Use :: to bind to all interfaces (IPv4 and IPv6) for Railway private networking
-# Legacy Railway environments (before Oct 2025) require IPv6 binding
-HOST="${HOST:-::}"
+# Bind to 0.0.0.0 for Railway - this works for both public and private networking
+# Railway's edge proxy connects via IPv4, and private networking works with either
+HOST="${HOST:-0.0.0.0}"
 WORKERS="${CVA_WORKERS:-1}"
 LOG_LEVEL="${CVA_LOG_LEVEL:-info}"
 TIMEOUT_KEEP_ALIVE="${CVA_TIMEOUT_KEEP_ALIVE:-30}"
