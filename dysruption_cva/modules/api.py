@@ -507,10 +507,7 @@ async def lifespan(app: FastAPI):
 
     # Log final configuration
     logger.info(
-        "Startup complete: production=%s, port=%s, upload_root=%s",
-        PRODUCTION_MODE,
-        os.getenv("PORT", "not_set"),
-        str(UPLOAD_ROOT),
+        f"Startup complete: production={PRODUCTION_MODE}, port={os.getenv('PORT', 'not_set')}, upload_root={UPLOAD_ROOT}"
     )
 
     # =========================================================================
