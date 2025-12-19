@@ -32,7 +32,8 @@ export default function RootPage() {
 
       // Check if user has any projects (onboarding status)
       try {
-        const response = await fetch('/api/cva/repos_connections');
+        // Backend endpoint is /api/config/repo_connections
+        const response = await fetch('/api/cva/api/config/repo_connections');
         
         if (response.ok) {
           const data = await response.json();

@@ -24,7 +24,8 @@ export const projectKeys = {
 // API functions - use Next.js API routes
 async function fetchProjects(): Promise<Project[]> {
   // Try to fetch repo connections from CVA backend via proxy
-  const response = await fetch('/api/cva/repos_connections');
+  // Backend endpoint is /api/config/repo_connections
+  const response = await fetch('/api/cva/api/config/repo_connections');
   if (!response.ok) {
     // If not available, return empty array (user hasn't connected repos yet)
     if (response.status === 404 || response.status === 502) {
