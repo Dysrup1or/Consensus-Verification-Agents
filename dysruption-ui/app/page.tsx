@@ -32,11 +32,13 @@ export default function RootPage() {
 
       // Check if user has any projects (onboarding status)
       try {
-        const response = await fetch('/api/cva/projects');
+        const response = await fetch('/api/cva/repos_connections');
         
         if (response.ok) {
           const data = await response.json();
-          const hasProjects = Array.isArray(data) && data.length > 0;
+          // repos_connections returns { connections: [...] }
+          const connections = data?.connections || data || [];
+          const hasProjects = Array.isArray(connections) && connections.length > 0;
           
           if (hasProjects) {
             router.replace('/dashboard');
